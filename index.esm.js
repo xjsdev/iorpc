@@ -1,19 +1,3 @@
-class RemoteError extends Error {
-  constructor(stack = "", message, ...args) {
-    super("\n" + stack, ...args);
-    this.name = 'RemoteError';
-    const stack2 = this.stack;
-    Object.defineProperties(this, {
-      message: {
-        value: message
-      },
-      stack: {
-        value: stack2
-      }
-    });
-  }
-}
-
 /**
  * Create new iorpc instance
  * @param {function} sendFn Function to send data to the iorpc instance on the other side.
@@ -180,3 +164,18 @@ export const createIorpc = (sendFn, localApi = {}, waitQueueSize = 10000) => {
     clbsSize: () => clbsSize
   };
 };
+class RemoteError extends Error {
+  constructor(stack = "", message, ...args) {
+    super("\n" + stack, ...args);
+    this.name = 'RemoteError';
+    const stack2 = this.stack;
+    Object.defineProperties(this, {
+      message: {
+        value: message
+      },
+      stack: {
+        value: stack2
+      }
+    });
+  }
+}
