@@ -90,7 +90,7 @@ If export is not specified, it will create a global variable:
 RequireJS, Webpack, Vite packagers, and more.
 
 # iorpc and websocket integration
-## Example websocket host (testPcHost.js)
+## Example websocket host (wsHost.js)
 This code snippet demonstrates the initialization of the module `iorpc` for working with WebSocket.
 
 
@@ -146,9 +146,9 @@ const localApi = {
       /*
         RemoteError:
         ReferenceError: c is not defined
-        at Object.<anonymous> (/testPcClient.js:50:17)
+        at Object.<anonymous> (/wsClient.js:50:17)
         ...
-        at async Object.functionWithErrorInCb (/testPcHost.js:44:7)
+        at async Object.functionWithErrorInCb (/wsHost.js:44:7)
       */
     }
     return () => {
@@ -172,7 +172,7 @@ wss.on('connection', ws => {
 console.log('WebSocket server running on port 8080')
 ```
 
-## Client (testPcClient.js)
+## Client (wsClient.js)
 
 ```javascript
 //const createIorpc = require('iorpc')
@@ -218,9 +218,9 @@ ws.on('open', async () => {
       /*
         RemoteError: 
         ReferenceError: b is not defined
-        at Object.functionWithError (/testPcHost.js:37:15)
+        at Object.functionWithError (/wsHost.js:37:15)
         ...
-        at async Timeout._onTimeout (/testPcClient.js:35:7)
+        at async Timeout._onTimeout (/wsClient.js:35:7)
       */
     }
     try {
@@ -238,9 +238,9 @@ ws.on('open', async () => {
   
         RemoteError: 
         ReferenceError: b is not defined
-        at Object.functionWithError (/testPcHost.js:37:15)
+        at Object.functionWithError (/wsHost.js:37:15)
         ...
-        at async Timeout._onTimeout (/testPcClient.js:35:7)
+        at async Timeout._onTimeout (/wsClient.js:35:7)
       */
     }
     // callback errors
@@ -254,9 +254,9 @@ ws.on('open', async () => {
       /*
         RemoteError:
         ReferenceError: d is not defined
-        at Object.<anonymous> (/testPcHost.js:49:17)
+        at Object.<anonymous> (/wsHost.js:49:17)
         ...
-        at async Timeout._onTimeout (/testPcClient.js:53:7)
+        at async Timeout._onTimeout (/wsClient.js:53:7)
       */
     }
 
@@ -387,20 +387,20 @@ Use `try...catch` to catch a remote error.
 ```javascript
 const localApi = {
   functionWithError() {
-    const a = b + 1 // <- /testPc2Host.js:37:15
+    const a = b + 1 // <- /wsHost.js:37:15
   },
 }
 /* ... */
 try {
-  await remoteApi.functionWithError() // <- /testPc1Client.js:35:7
+  await remoteApi.functionWithError() // <- /wsClient.js:35:7
 } catch (e) {
   console.log(e)
 }
 /*
 ReferenceError: b is not defined
-    at Object.functionWithError (/testPcHost.js:37:15)
+    at Object.functionWithError (/wsHost.js:37:15)
     ...
-    at async Timeout._onTimeout (/testPcClient.js:35:7)
+    at async Timeout._onTimeout (/wsClient.js:35:7)
 */
 ```
 If your script terminated, you can see it if you switch your debugger to stdout.
