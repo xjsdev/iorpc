@@ -57,7 +57,7 @@ Every dynamic variable `Function` has a method `void unbind()`
    x2.unbind()
 ```
 
-Release bindings to dynamic functions if there are many of them. If the incoming functions are not functions, release is not necessary.
+Release bindings to dynamic functions for continuous operation. If the incoming variables are not functions, release is not necessary.
 
 You can write in both good and bad ways, depending on the situation. Make complex things simpler.
 
