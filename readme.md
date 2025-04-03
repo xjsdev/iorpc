@@ -270,7 +270,7 @@ ws.on('close', () => {
 
 ## API Inventory
 ### function createIorpc(sendFn: Function, localApi?: Object, waitQueueSize?: Number): Object
-Create new iorpc instance. There is no client or server here, both parties can simultaneously extend the API.
+Create new iorpc instance. There is no client or server here, both parties can simultaneously share the API.
 ```javascript
 const sendFn = data => ws.send(JSON.stringify(data))
 const {      
@@ -348,7 +348,7 @@ remoteFunctionWithUnbind.unbind()
 ```
 
 ### Functions in `this` object
-`remoteApi` and `iorpcClbsSize` are available in the function object. In arrow functions, variables in this are not available.
+`remoteApi` and `iorpcClbsSize` are available in the function object. In arrow functions, variables in `this` are not available.
 ```javascript
 const localApi = { // these are not arrow functions, so here the variables in `this` are
   func(cb) {
