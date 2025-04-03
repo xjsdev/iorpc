@@ -187,7 +187,7 @@ const { routeInput, remoteApi, clbsSize } = createIorpc(data => ws.send(JSON.str
 ws.on('message', data => routeInput(JSON.parse(data)))
 
 ws.on('open', async () => {
-  console.log('Підключено до сервера')
+  console.log('Connected to server')
 
   const ret = await remoteApi.greetings2('Hello')
   console.log(ret) // Hello world
