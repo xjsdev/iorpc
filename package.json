@@ -1,0 +1,8 @@
+{
+  "name": "iorpc",
+  "version": "8.0.1",
+  "keywords": ["rpc", "callback", "univarsal", "net"],
+  "license": "MIT",
+  "description": "This is a lightweight module for implementing remote asynchronous function calls (RPC) between different scripts using various transports, like WebSockets. It allows calling functions on a remote API and routing responses with minimal configuration.",
+  "author": "Oleksandr Parashchuk <xjsdev@gmail.com> (https://devjs.us/)"
+}
