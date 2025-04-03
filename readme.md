@@ -270,7 +270,7 @@ ws.on('close', () => {
 
 ## API Inventory
 ### function createIorpc(sendFn: Function, localApi?: Object, waitQueueSize?: Number): Object
-Create new iorpc instance. There is no client or server here, both parties can simultaneously share the API.
+Create new iorpc instance. There is no client or server here, both parties can distribute the API simultaneously.
 ```javascript
 const sendFn = data => ws.send(JSON.stringify(data))
 const {      
