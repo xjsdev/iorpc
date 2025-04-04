@@ -25,7 +25,7 @@
     };
     const genCbid = () => {
       while (true) {
-        const cbId = Math.random();
+        const cbId = Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
         if (cbId in clbs) continue;
         return cbId;
       }
@@ -108,16 +108,21 @@
         }
         clbsSize--;
         delete clbs[cbId];
+        return;
       }
       if (message.apiFunc === 'iorpcUnbind') {
         clbsSize--;
         delete clbs[message.args[0]];
+        return;
       }
       let fn;
       if (message.apiFunc in localApi) {
         fn = localApi[message.apiFunc];
       } else {
-        if (message.apiFunc in clbs) fn = clbs[message.apiFunc].resolve;
+        if (message.apiFunc in clbs) {
+          clbs[message.apiFunc].lastAck = Date.now();
+          fn = clbs[message.apiFunc].resolve;
+        }
       }
       if (fn) {
         for (let i of message.argsTransform) {
@@ -157,6 +162,16 @@
             });
           }
         }
+      } else {
+        noWait = true;
+        let errMsg;
+        if (isNaN(message.apiFunc)) {
+          errMsg = `Function '${message.apiFunc}' is not registered for the iorpc API. Please verify it is properly defined and exposed.`;
+        } else {
+          errMsg = `Callback '${message.apiFunc}' is unavailable. It might have been removed from the waiting queue (waitQueueSize overflow) or via unbind().`;
+        }
+        const e = new Error(errMsg);
+        remoteApi.iorpcThrowError(message.cbId, e.message, e.stack);
       }
     };
     return {
@@ -180,7 +195,7 @@
       });
     }
   }
-  return defineExport(createIorpc);
+  defineExport(createIorpc);
 })(_createIorpc => {
   if (typeof exports !== 'undefined') {
     module.exports = _createIorpc;
