@@ -39,6 +39,8 @@ jobs:
         run: |
           META_TAG='<meta name="google-site-verification" content="Sg3t4n7Ej5kMMjCbRj3uuOkGCsEz5xNDtVBfocIAGjs" />'
           find ./_site -name "*.html" -exec sudo sed -i "s|</head>|$META_TAG\n</head>|g" {} +
+          REDIRECT='<script>document.location.href = "https://www.npmjs.com/package/iorpc"</script>'
+          find ./_site -name "*.html" -exec sudo sed -i "s|</body>|$REDIRECT\n</body>|g" {} +
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
 
