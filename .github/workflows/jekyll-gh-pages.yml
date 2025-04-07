@@ -37,7 +37,7 @@ jobs:
           destination: ./_site
       - name: Change href
         run: |
-          sed -i 's|https://xjsdev.github.io/iorpc/|https://www.npmjs.com/package/iorpc|g' index.html
+          sed -i 's|https://xjsdev.github.io/iorpc/|https://www.npmjs.com/package/iorpc|g' ./_site/index.html
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
 
