@@ -35,7 +35,7 @@ jobs:
         with:
           source: ./
           destination: ./_site
-      - name: Inject Google Site Verification Meta Tag
+      - name: Change href
         run: |
           sed -i 's|https://xjsdev.github.io/iorpc/|https://www.npmjs.com/package/iorpc|g' index.html
       - name: Upload artifact
