@@ -38,6 +38,7 @@ jobs:
       - name: Change href
         run: |
           sudo sed -i 's|https://xjsdev.github.io/iorpc/|https://www.npmjs.com/package/iorpc|g' ./_site/index.html
+          sudo sed -i '/<div class="footer border-top border-gray-light mt-5 pt-3 text-right text-gray">/,/<\/div>/d' ./_site/index.html
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
 
