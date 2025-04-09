@@ -2,7 +2,7 @@
 
 `ioRPC` —  is a lightweight module for implementing a mechanism for remote asynchronous function calls between different scripts using various transports, for example, WebSockets. This module allows you to call functions on a remote API and send responses with a minimum of configuration. Allows you to call a JavaScript function on another computer. Works both on nodejs and in the browser.
 
-## Concept
+## Example
 
 Create functions that can be called remotely by passing function references
 ```javascript
@@ -90,6 +90,9 @@ If export is not specified, it will create a global variable:
 RequireJS, Webpack, Vite packagers, and more.
 
 # iorpc and websocket integration
+
+You can try this example on stackblitz.com [HERE](https://stackblitz.com/edit/stackblitz-starters-j9v4dm61?file=wsHost.js,wsClient.js).
+
 ## Example websocket host (wsHost.js)
 This code snippet demonstrates the initialization of the module `iorpc` for working with WebSocket.
 
@@ -157,7 +160,7 @@ const localApi = {
   }
 }
 
-const wss = new WebSocket.Server({ port: 8080 })
+const wss = new WebSocketServer({ port: 8080 })
 wss.on('connection', ws => {
   const { routeInput, remoteApi } = createIorpc(data => ws.send(JSON.stringify(data)), localApi)
   ws.on('message', data => routeInput(JSON.parse(data))) // incoming messages are passed to 'routeInput' for processing via iorpc.
