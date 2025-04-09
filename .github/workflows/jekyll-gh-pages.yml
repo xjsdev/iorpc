@@ -40,7 +40,7 @@ jobs:
           sudo sed -i 's|https://xjsdev.github.io/iorpc/|https://www.npmjs.com/package/iorpc|g' ./_site/index.html
           sudo sed -i '/<div class="footer border-top border-gray-light mt-5 pt-3 text-right text-gray">/,/<\/div>/d' ./_site/index.html
           META_TAG='<meta name="keywords" content="Node.js, JavaScript, RPC, Remote Procedure Call, Lightweight RPC, Inter-worker communication, Web Workers, SharedWorker, MessageChannel, JS communication, async function call, browser messaging, function proxy, thread communication, frontend utils, postMessage API, JavaScript library, JS workers communication, JSON-RPC, browser workers, iorpc, iorpc npm, iorpc JavaScript, call functions across contexts, proxy-based RPC, worker-to-main thread communication, JS threading, context bridge, worker utils JS, async communication JS, how to call function in Web Worker, lightweight RPC JavaScript, JS worker communication library, remote procedure call browser, simple RPC with postMessage, Call from another script, module for implementing a mechanism for remote asynchronous function calls">'
-          sudo sed -i "s|</head>|$META_TAG\n</head>|g" {} + ./_site/index.html
+          sudo sed -i "s|</head>|$META_TAG\n</head>|g" ./_site/index.html
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
 
