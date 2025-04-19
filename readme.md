@@ -1,12 +1,106 @@
 # ioRPC
 
-`ioRPC` —  is a lightweight module for implementing a mechanism for remote asynchronous function calls between different scripts using various transports, for example, WebSockets. This module allows you to call functions on a remote API and send responses with a minimum of configuration. Allows you to call a JavaScript function on another computer. Works both on nodejs and in the browser.
+`ioRPC`is a lightweight module for remote asynchronous function calls between different scripts using various transports—such as WebSockets. It enables seamless invocation of remote APIs and handling of responses with minimal configuration. You can use it to call JavaScript functions running on another machine, in Node.js, or directly in the browser.
+
+It’s especially useful for smooth communication between different execution contexts (like a browser window and a Web Worker). A standout feature is its ability to serialize **functions as arguments or return values**, making it easy to implement things like real-time progress updates via callbacks.
+
+---
+
+## ✅ Why `ioRPC` is Great
+
+### 🔗 Transparent Remote Function Calls
+Call remote functions just like local ones:
+```js
+await remote.add(1, 2);
+```
+
+### 🔄 Function Serialization
+You can pass functions as arguments and even receive functions as return values:
+
+```js
+let fn = await remote.getCallback();
+await fn("hello");
+```
+
+### 🔌 Pluggable Transport
+Use any transport — WebSocket, MessagePort, iframe, or even `window.postMessage`.
+
+### ⚙️ Simple API
+Create a local/remote pair with a very minimal setup.
+
+### 🧩 Works Everywhere
+Use in browser apps, Node.js, workers, iframes — anywhere messages can be sent.
+
+---
+
+## 🧠 Real-World Example: UI + Web Worker
+### 🟦 Without `ioRPC`:
+You'd have to manually:
+
+- serialize messages to `postMessage`
+
+- listen to `message` events and dispatch handlers
+
+- track unique `id`s for each request
+
+- manually wire up promise/response logic
+
+Too much boilerplate.
+
+---
+
+### ⚡️ With `ioRPC`:
+#### UI (main window)
+
+```js
+import { pair } from "https://xjsdev.github.io/iorpc/index.js";
+
+const worker = new Worker("worker.js");
+
+const { local, remote } = pair({
+  send: msg => worker.postMessage(msg),
+  on: handler => worker.onmessage = e => handler(e.data)
+});
+
+async function run() {
+  await remote.processData([1, 2, 3], progress => {
+    console.log("Progress:", progress);
+  });
+}
+```
+---
+#### Worker (worker.js)
+```js
+importScripts("https://xjsdev.github.io/iorpc/index.js");
+
+const { local, remote } = pair({
+  send: msg => postMessage(msg),
+  on: handler => onmessage = e => handler(e.data)
+});
+
+local.processData = async function(data, onProgress) {
+  for (let i = 0; i < data.length; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    await onProgress((i + 1) / data.length);
+  }
+};
+```
+---
+🚀 Highlights
+No manual message/event plumbing
+
+- You can pass onProgress() callback from UI to worker
+
+- The worker just calls it like a local function
+
+- Everything works asynchronously with await
 
 ## Example
 
 Create functions that can be called remotely by passing function references
 ```javascript
 // script1.js
+
 const localApi = {
   func1(a,b) {
     return a + b
@@ -25,12 +119,10 @@ const localApi = {
     }
   }
 }
-//shareToScript2(localApi)
 ```
 Calling from another script
 ```javascript
 // script2.js
-//const remoteApi = connectToScript1()
 
 const x1 = await remoteApi.func1("Hello"," world")
 // x0 = "Hello world"
@@ -71,37 +163,37 @@ npm install iorpc
 ```
 Connect
 ```javascript
-import createIorpc from 'iorpc' 
+import { pair } from 'iorpc' 
 /* or */
-const createIorpc = require('iorpc')
+const { pair } = require('iorpc')
 ```
 ```html
 <script type="module">
-  import createIorpc from "https://unpkg.com/iorpc/index.esm.js";
+  import { pair } from "https://unpkg.com/iorpc/index.esm.js";
 </script>
 ```
 If export is not specified, it will create a global variable:
 ```html
 <script src="https://unpkg.com/iorpc/index.js"></script>
 <script>
-  createIorpc
+  const { pair } = iorpc
 </script>
 ```
 RequireJS, Webpack, Vite packagers, and more.
 
 # iorpc and websocket integration
 
-You can try this example on stackblitz.com [HERE](https://stackblitz.com/edit/stackblitz-starters-j9v4dm61?file=wsHost.js,wsClient.js).
+You can try this example on stackblitz.com [HERE](https://stackblitz.com/edit/stackblitz-starters-5junm7mk?file=wsHost.js,wsClient.js).
 
 ## Example websocket host (wsHost.js)
 This code snippet demonstrates the initialization of the module `iorpc` for working with WebSocket.
 
 
 ```javascript
-//const createIorpc = require('iorpc')
-//const {WebSocketServer} = require('ws')
-import createIorpc from "iorpc"
+//const {WebSocketServer} = require('ws') // WebSocket.Server
+//const { pair } = require('iorpc')
 import { WebSocketServer } from "ws"
+import { pair } from 'iorpc'
 
 const localApi = {
   /**
@@ -122,8 +214,8 @@ const localApi = {
     // is not an arrow function, so 'this.remoteApi' is available here
     // async this.remoteApi.fn() if functions are declared on the other side
     const hSubscribeInterval = setInterval(async() => {
-      const iorpcClbsSize = await cbOnClient(Date.now())
-      console.log(`ClbsSize: remote ${iorpcClbsSize} local ${this.iorpcClbsSize()}`)
+      const iorpcPending = await cbOnClient(Date.now())
+      console.log(`ClbsSize: remote ${iorpcPending} local ${this.iorpcPending()}`)
       // ClbsSize: remote 1 local 1
     }, 1000)
     return function () {
@@ -133,7 +225,7 @@ const localApi = {
     }
   },
   clbsSize() {
-    return this.iorpcClbsSize()
+    return this.iorpcPending()
   },
   functionWithError() {
     const a = b + 1
@@ -157,13 +249,26 @@ const localApi = {
     return () => {
       const a = d + 1
     }
+  },
+  async functionWithReturnOfTwoFn() {
+    return {
+      fn1() {
+        return 'fn1 ok'
+      },
+      fn2() {
+        return 'fn2 ok'
+      }
+    }
   }
 }
 
-const wss = new WebSocketServer({ port: 8080 })
+const wss = new WebSocketServer({ port: 8080 });
 wss.on('connection', ws => {
-  const { routeInput, remoteApi } = createIorpc(data => ws.send(JSON.stringify(data)), localApi)
-  ws.on('message', data => routeInput(JSON.parse(data))) // incoming messages are passed to 'routeInput' for processing via iorpc.
+  const { remote } = pair({
+    send: data => ws.send(JSON.stringify(data)),
+    on: handler => ws.on('message', data => handler(JSON.parse(data))), // incoming messages are passed to 'routeInput' for processing via iorpc.
+    local: localApi
+  })
   ws.on('close', () => {
     console.log('Client disconnected')
   })
@@ -178,29 +283,30 @@ console.log('WebSocket server running on port 8080')
 ## Client (wsClient.js)
 
 ```javascript
-//const createIorpc = require('iorpc')
 //const WebSocket = require('ws')
-import createIorpc from "iorpc"
+//const { pair } = require('iorpc')
 import WebSocket from "ws"
+import { pair } from 'iorpc';
 
 const ws = new WebSocket('ws://localhost:8080')
 
-const { routeInput, remoteApi, clbsSize } = createIorpc(data => ws.send(JSON.stringify(data)))
-
-ws.on('message', data => routeInput(JSON.parse(data)))
+const { remote, pending } = pair({
+  send: data => ws.send(JSON.stringify(data)),
+  on: handler => ws.on('message', data => handler(JSON.parse(data)))
+})
 
 ws.on('open', async () => {
   console.log('Connected to server')
 
-  const ret = await remoteApi.greetings2('Hello')
+  const ret = await remote.greetings2('Hello')
   console.log(ret) // Hello world
 
-  remoteApi.noWait.greetings('Hi') // if you don't need to wait for a result
+  remote.noWait.greetings('Hi') // if you don't need to wait for a result
 
-  const unsubscribe = await remoteApi.subscribeToUpdates(function (time) {
+  const unsubscribe = await remote.subscribeToUpdates(function (time) {
     // remember, in arrow functions, variables in 'this' are not available
     console.log("server time:" + time)
-    return this.iorpcClbsSize()
+    return this.iorpcPending()
   })
 
   setTimeout(async ()=>{
@@ -208,16 +314,16 @@ ws.on('open', async () => {
     unsubscribe.unbind() // notifies the remote party that we will no longer call unsubscribe()
 
     // overflow check
-    const remoteClbsSize = await remoteApi.clbsSize()
-    const localClbsSize = clbsSize()
+    const remoteClbsSize = await remote.clbsSize()
+    const localClbsSize = pending()
     console.log(`ClbsSize final: remote ${remoteClbsSize} local ${localClbsSize}`)
     // ClbsSize final: remote 0 local 0
-    
+
     // broadcast remote errors
     try {
-      await remoteApi.functionWithError()
+      await remote.functionWithError()
     } catch (e) {
-      console.log(e) 
+      console.log(e)
       /*
         RemoteError: 
         ReferenceError: b is not defined
@@ -227,13 +333,13 @@ ws.on('open', async () => {
       */
     }
     try {
-      await remoteApi.functionWithThrow()
+      await remote.functionWithThrow()
     } catch (e) {
       console.log(e) // someError
     }
     if (0) { // to check put 1
       // error without catch in console is also informative, combines 2 call stacks
-      await remoteApi.functionWithError()
+      await remote.functionWithError()
       /*terminated, process console:
 
         node:internal/process/promises:394
@@ -247,7 +353,7 @@ ws.on('open', async () => {
       */
     }
     // callback errors
-    const cbWithErr = await remoteApi.functionWithErrorInCb(()=>{
+    const cbWithErr = await remote.functionWithErrorInCb(()=>{
       const a = c + 1
     })
     try {
@@ -262,8 +368,16 @@ ws.on('open', async () => {
         at async Timeout._onTimeout (/wsClient.js:53:7)
       */
     }
+    cbWithErr.unbind()
 
-    // Passing references to functions inside an object or array is not yet implemented. It is better to declare it in the api.
+    // The ability to pass function references within objects or arrays is implemented. Make sure to unbind them when they are no longer in use.
+    const {fn1, fn2} = await remote.functionWithReturnOfTwoFn()
+    console.log(await fn1()) // fn1
+    console.log(await fn2()) // fn2
+    fn1.unbind()
+    fn2.unbind()
+    const remoteClbsSize2 = await remote.clbsSize()
+    console.log(remoteClbsSize2) // 0
   }, 3000)
 })
 ws.on('close', () => {
@@ -271,59 +385,64 @@ ws.on('close', () => {
 })
 ```
 
-## API Inventory
-### function createIorpc(sendFn: Function, localApi?: Object, waitQueueSize?: Number): Object
-Create new iorpc instance. There is no client or server here, both parties can distribute the API simultaneously.
+---
+
+### function pair({ send, on, local, options? }): { remote, local, pending }
+Creates a new ioRPC instance for asynchronous remote procedure calls. This function enables bi-directional communication between two endpoints using any message-based transport (such as WebSocket, postMessage, etc.).
 ```javascript
-const sendFn = data => ws.send(JSON.stringify(data))
-const {      
-  remoteApi /* An proxy-object with remoteApi callers */,
-  routeInput /* Function to handle incoming messages */,
-  clbsSize /* Returns the size of the waiting list to check if it is overflowing */
-} = createIorpc(sendFn, localApi = {}, waitQueueSize = 10000)
+const { remote } = pair({
+  send: data => ws.send(JSON.stringify(data)), // Sends data to the remote side
+  on: handler => ws.on('message', data => handler(JSON.parse(data))), // Subscribes to incoming messages
+  local: localApi // Local API methods that can be called remotely
+})
 ```
-`sendFn: Function` – Function to send data to the iorpc instance on the other side. Required.
+`send: Function` – Required. A function used to send messages to the other side.
+Example: `(data) => transport.send(JSON.stringify(data))`
 
-`localApi?: Object` – An object containing methods callable from the remote side; this is optional if you don't need the remote side to call methods back on this side.
+`on: Function` – Required. A function to subscribe to incoming messages.
+It should accept a callback which will receive parsed message objects.
+`Example: handler => transport.on('message', data => handler(JSON.parse(data)))`
 
-`waitQueueSize?: number = 10000` – Maximum number of functions waiting in queue (default 10000). If you exceed this, the oldest unbound bindings will be removed. Similar to `freemem()` C++, you should free bindings to permanent callbacks with `unbind()` when they are no longer needed. If you use named calls with remoteApi, these temporary callbacks are removed automatically. If you need the number of concurrent waits to be higher, you should increase `waitQueueSize`.
+`local?: Object = {}` – Optional. An object containing methods that the remote side can call.
 
-`Return` - An object with remoteApi (remote API functions) and routeInput (input message handler)
+`options?: Object` – Optional configuration parameters:
+
+- `maxPendingResponses: number = 10000` – Maximum number of unresolved async calls allowed at once. Prevents memory overflow. Throws error if the limit is exceeded.
+- `allowNestedFunctions: boolean = true` – If true, allows functions to be nested in objects or arrays and passed remotely.
+- `exposeErrors: boolean = true` – If true, forwards full remote error details (like stack traces). If false, replaces them with a generic message.
+- `injectToThis: boolean = true` – If true, replaces this inside called functions with the ioRPC object itself.
+
+`Return` - An object with the following properties:
+- `remote: Object` – A proxy object. Accessing `remote.someFunction()` will trigger a remote call to `someFunction` on the other side.
+- `local: Object` – The original local API passed (can be extended dynamically).
+- `pending: Function` – Returns the current number of active, bound remote calls (i.e., the wait queue size).
+  Useful to monitor memory usage or detect forgotten `unbind()` calls.
 
 
+### async function remote\[functionName](...args): any
 
-### function routeInput(message:Object): void
-
-Input message handler.
+Calls a remote function asynchronously.
 
 ```javascript
-ws.on('message', data => routeInput(JSON.parse(data)))
+const result = await remote.sum(2, 3)
 ```
 
-`message: Object` - An object that is received from another party, that was sent from `sendFn`
+`...args` - Can include strings, numbers, arrays, objects, or async functions.
+
+`return` - Returns a Promise that resolves with the result of the remote function call. Nested function-containing objects/arrays are only supported if `allowNestedFunctions` is enabled.
 
 
-
-### async function remoteApi\[funcname:string](...any): any
-
-`remoteApi` - An proxy-object with remoteApi callers.
-
-```javascript
-const ret = await remoteApi.funcname(...args)
+### remote.noWait\[functionName](...args): void
+`void remote.noWait.funcNameSync()` - Performs a remote call without waiting for a response (fire-and-forget mode).
+Use this for logging, events, or when the result doesn't matter:
+```js
+remote.noWait.sendPing()
 ```
-
-`...args?: string, number, array, object, async function` - Input parameters passed to the other side. Cannot contain objects or arrays with functions inside.
-
-`Return: string, number, array, object, async function` - The result of a remote function. Cannot contain objects or arrays with functions inside.
-
-
-#### noWait modifier
-`void remoteApi.noWait.funcNameSync()` - Synchronous mode, disables waiting for a response from the server.
 
 #### Reserved function names
 
-Function names `iorpcUnbind` and `iorpcThrowError` are part of the internal implementation, you should not use them.
-
+The following function names are reserved for internal use and should not be defined in your APIs:
+`iorpcUnbind`, `iorpcThrowError`
 
 ### function unbind(): void
 
@@ -351,19 +470,19 @@ remoteFunctionWithUnbind.unbind()
 ```
 
 ### Functions in `this` object
-`remoteApi` and `iorpcClbsSize` are available in the function object. In arrow functions, variables in `this` are not available.
+`remoteApi` and `iorpcPending` are available in the function object. In arrow functions, variables in `this` are not available.
 ```javascript
 const localApi = { // these are not arrow functions, so here the variables in `this` are
   func(cb) {
     this.remoteApi
-    this.iorpcClbsSize()
+    this.iorpcPending()
 
     cb(function () {
       this.remoteApi
-      this.iorpcClbsSize()
+      this.iorpcPending()
       return function () {
         this.remoteApi
-        this.iorpcClbsSize()
+        this.iorpcPending()
       }
     })
   }
@@ -371,10 +490,10 @@ const localApi = { // these are not arrow functions, so here the variables in `t
 
 await remoteApi.func(function () {
   this.remoteApi
-  this.iorpcClbsSize()
+  this.iorpcPending()
   return function () {
     this.remoteApi
-    this.iorpcClbsSize()
+    this.iorpcPending()
   }
 })
 
@@ -424,5 +543,5 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 IoRPC comes with ABSOLUTELY NO WARRANTY.
 
-Copyright (c) 2025 Parashchuk Oleksandr <span><a href="https://www.linkedin.com/in/oleksandr-parashchuk-1a5951165/"><img src="https://linkedin.com/favicon.ico" alt="linkedin.com" width="16"/></a></span>. All rights reserved.
+Parashchuk Oleksandr<span><a href="https://www.linkedin.com/in/oleksandr-parashchuk-1a5951165/"><img src="https://linkedin.com/favicon.ico" alt="linkedin.com" width="16"/></a></span> © 2025
 
