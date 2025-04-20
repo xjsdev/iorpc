@@ -1,6 +1,6 @@
 # ioRPC
 
-`ioRPC`is a lightweight module for remote asynchronous function calls between different scripts using various transports—such as WebSockets. It enables seamless invocation of remote APIs and handling of responses with minimal configuration. You can use it to call JavaScript functions running on another machine, in Node.js, or directly in the browser.
+`ioRPC`is a lightweight module for remote asynchronous function calls between different scripts using various transports. It enables seamless invocation of remote APIs and handling of responses with minimal configuration. You can use it to call JavaScript functions running on another machine, in Node.js, or directly in the browser.
 
 It’s especially useful for smooth communication between different execution contexts (like a browser window and a Web Worker). A standout feature is its ability to serialize **functions as arguments or return values**, making it easy to implement things like real-time progress updates via callbacks.
 
@@ -396,10 +396,10 @@ const { remote } = pair({
   local: localApi // Local API methods that can be called remotely
 })
 ```
-`send: Function` – Required. A function used to send messages to the other side.
+`send: Function` – **Required**. A function used to send messages to the other side.
 Example: `(data) => transport.send(JSON.stringify(data))`
 
-`on: Function` – Required. A function to subscribe to incoming messages.
+`on: Function` – **Required**. A function to subscribe to incoming messages.
 It should accept a callback which will receive parsed message objects.
 `Example: handler => transport.on('message', data => handler(JSON.parse(data)))`
 
@@ -407,10 +407,10 @@ It should accept a callback which will receive parsed message objects.
 
 `options?: Object` – Optional configuration parameters:
 
-- `maxPendingResponses: number = 10000` – Maximum number of unresolved async calls allowed at once. Prevents memory overflow. Throws error if the limit is exceeded.
+- `maxPendingResponses: number = 10000` – Maximum number of unresolved async calls allowed at once. Prevents overflow. It warns once about an error if the limit is exceeded, and deletes the oldest one used.
 - `allowNestedFunctions: boolean = true` – If true, allows functions to be nested in objects or arrays and passed remotely.
 - `exposeErrors: boolean = true` – If true, forwards full remote error details (like stack traces). If false, replaces them with a generic message.
-- `injectToThis: boolean = true` – If true, replaces this inside called functions with the ioRPC object itself.
+- `injectToThis: boolean = true` – If true, replaces this inside called functions with `this.remoteApi`.
 
 `Return` - An object with the following properties:
 - `remote: Object` – A proxy object. Accessing `remote.someFunction()` will trigger a remote call to `someFunction` on the other side.
@@ -470,7 +470,8 @@ remoteFunctionWithUnbind.unbind()
 ```
 
 ### Functions in `this` object
-`remoteApi` and `iorpcPending` are available in the function object. In arrow functions, variables in `this` are not available.
+If enabled `injectToThis` then `remoteApi` and `iorpcPending` are available in the function object. 
+In arrow functions, variables in `this` are not available.
 ```javascript
 const localApi = { // these are not arrow functions, so here the variables in `this` are
   func(cb) {
