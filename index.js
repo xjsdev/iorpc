@@ -2,8 +2,7 @@
   // extract values
   const recuFilter = (tree, copy, valCreator) => {
     const recu = (tree, copy) => {
-      if (typeof tree === 'object' && !Buffer.isBuffer(tree) && !(typeof tree?.subarray === 'function') // like Int32Array
-      ) {
+      if (typeof tree === 'object') {
         for (let k of Object.keys(tree)) {
           if (['__proto__', 'constructor', 'prototype'].includes(k)) continue;
           copy[k] = {};
