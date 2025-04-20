@@ -73,7 +73,7 @@ async function run() {
 ```js
 importScripts("https://xjsdev.github.io/iorpc/index.js");
 
-const { local, remote } = pair({
+const { local, remote } = iorpc.pair({
   send: msg => postMessage(msg),
   on: handler => onmessage = e => handler(e.data)
 });

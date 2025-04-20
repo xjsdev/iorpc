@@ -351,7 +351,6 @@
       };
     }
   };
-  pair = iorpc.pair;
   if (typeof exports !== 'undefined') {
     module.exports = iorpc;
     module.exports.default = iorpc;
