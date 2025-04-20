@@ -53,7 +53,7 @@ Too much boilerplate.
 #### UI (main window)
 
 ```js
-import { pair } from "https://xjsdev.github.io/iorpc/index.js";
+import { pair } from "https://unpkg.com/iorpc/index.esm.js";
 
 const worker = new Worker("worker.js");
 
@@ -71,7 +71,7 @@ async function run() {
 ---
 #### Worker (worker.js)
 ```js
-importScripts("https://xjsdev.github.io/iorpc/index.js");
+importScripts("https://unpkg.com/iorpc/index.js");
 
 const { local, remote } = iorpc.pair({
   send: msg => postMessage(msg),
