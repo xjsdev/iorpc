@@ -11,15 +11,15 @@ It’s especially useful for smooth communication between different execution co
 ### 🔗 Transparent Remote Function Calls
 Call remote functions just like local ones:
 ```js
-await remote.add(1, 2);
+await remote.add(1, 2)
 ```
 
 ### 🔄 Function Serialization
 You can pass functions as arguments and even receive functions as return values:
 
 ```js
-let fn = await remote.getCallback();
-await fn("hello");
+let fn = await remote.getCallback()
+await fn("hello")
 ```
 
 ### 🔌 Pluggable Transport
@@ -52,38 +52,41 @@ Too much boilerplate.
 ### ⚡️ With `ioRPC`:
 #### UI (main window)
 
-```js
-import { pair } from "https://unpkg.com/iorpc/index.esm.js";
+```html
+<script type="module">
+  import { pair } from "https://unpkg.com/iorpc/index.esm.js"
 
-const worker = new Worker("worker.js");
+  const worker = new Worker("worker.js")
 
-const { local, remote } = pair({
-  send: msg => worker.postMessage(msg),
-  on: handler => worker.onmessage = e => handler(e.data)
-});
+  const {local, remote} = pair({
+    send: msg => worker.postMessage(msg),
+    on: handler => worker.onmessage = e => handler(e.data)
+  })
 
-async function run() {
-  await remote.processData([1, 2, 3], progress => {
-    console.log("Progress:", progress);
-  });
-}
+  async function run() {
+    await remote.processData([1, 2, 3], progress => {
+      console.log("Progress:", progress)
+    })
+  }
+  run()
+</script>
 ```
 ---
 #### Worker (worker.js)
 ```js
-importScripts("https://unpkg.com/iorpc/index.js");
+importScripts("https://unpkg.com/iorpc/index.js")
 
 const { local, remote } = iorpc.pair({
   send: msg => postMessage(msg),
   on: handler => onmessage = e => handler(e.data)
-});
+})
 
 local.processData = async function(data, onProgress) {
   for (let i = 0; i < data.length; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    await onProgress((i + 1) / data.length);
+    await new Promise(r => setTimeout(r, 500))
+    await onProgress((i + 1) / data.length)
   }
-};
+}
 ```
 ---
 🚀 Highlights
@@ -169,7 +172,7 @@ const { pair } = require('iorpc')
 ```
 ```html
 <script type="module">
-  import { pair } from "https://unpkg.com/iorpc/index.esm.js";
+  import { pair } from "https://unpkg.com/iorpc/index.esm.js"
 </script>
 ```
 If export is not specified, it will create a global variable:
@@ -262,7 +265,7 @@ const localApi = {
   }
 }
 
-const wss = new WebSocketServer({ port: 8080 });
+const wss = new WebSocketServer({ port: 8080 })
 wss.on('connection', ws => {
   const { remote } = pair({
     send: data => ws.send(JSON.stringify(data)),
@@ -286,7 +289,7 @@ console.log('WebSocket server running on port 8080')
 //const WebSocket = require('ws')
 //const { pair } = require('iorpc')
 import WebSocket from "ws"
-import { pair } from 'iorpc';
+import { pair } from 'iorpc'
 
 const ws = new WebSocket('ws://localhost:8080')
 
