@@ -89,8 +89,8 @@ local.processData = async function(data, onProgress) {
 }
 ```
 ---
-🚀 Highlights
-No manual message/event plumbing
+### 🚀 Highlights
+- No manual message/event plumbing
 
 - You can pass onProgress() callback from UI to worker
 
