@@ -373,12 +373,14 @@ ws.on('open', async () => {
     }
     cbWithErr.unbind()
 
-    // The ability to pass function references within objects or arrays is implemented. Make sure to unbind them when they are no longer in use.
-    const {fn1, fn2} = await remote.functionWithReturnOfTwoFn()
-    console.log(await fn1()) // fn1
-    console.log(await fn2()) // fn2
-    fn1.unbind()
-    fn2.unbind()
+    if (false) { // works if allowNestedFunctions option is true
+      // The ability to pass function references within objects or arrays is implemented. Make sure to unbind them when they are no longer in use.
+      const {fn1, fn2} = await remote.functionWithReturnOfTwoFn()
+      console.log(await fn1()) // fn1
+      console.log(await fn2()) // fn2
+      fn1.unbind()
+      fn2.unbind()
+    }
     const remoteClbsSize2 = await remote.clbsSize()
     console.log(remoteClbsSize2) // 0
   }, 3000)
@@ -411,9 +413,10 @@ It should accept a callback which will receive parsed message objects.
 `options?: Object` – Optional configuration parameters:
 
 - `maxPendingResponses: number = 10000` – Maximum number of unresolved async calls allowed at once. Prevents overflow. It warns once about an error if the limit is exceeded, and deletes the oldest one used.
-- `allowNestedFunctions: boolean = true` – If true, allows functions to be nested in objects or arrays and passed remotely.
+- `allowNestedFunctions: boolean = false` – If true, allows functions to be nested in objects or arrays and passed remotely.
 - `exposeErrors: boolean = true` – If true, forwards full remote error details (like stack traces). If false, replaces them with a generic message.
 - `injectToThis: boolean = true` – If true, replaces this inside called functions with `this.remoteApi`.
+- `ignoreCallbackUnavailable: boolean = false` – If true, errors due to missing callbacks will be ignored. Useful when integrating multiple interfaces over a single channel.
 
 `Return` - An object with the following properties:
 - `remote: Object` – A proxy object. Accessing `remote.someFunction()` will trigger a remote call to `someFunction` on the other side.

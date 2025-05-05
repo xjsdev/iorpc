@@ -75,9 +75,10 @@
    */
   const createIorpc = (sendFn, localApi = {}, {
     maxPendingResponses = 10000,
-    allowNestedFunctions = true,
+    allowNestedFunctions = false,
     exposeErrors = true,
-    injectToThis = true
+    injectToThis = true,
+    ignoreCallbackUnavailable = false
   }) => {
     const clbs = {};
     let trimWarningFired = false;
@@ -279,6 +280,7 @@
         if (isNaN(message.apiFunc)) {
           errMsg = `Function '${message.apiFunc}' is not registered for the iorpc API. Please verify it is properly defined and exposed.`;
         } else {
+          if (ignoreCallbackUnavailable) return;
           errMsg = `Callback '${message.apiFunc}' is unavailable. It might have been removed from the waiting queue (maxPendingResponses overflow) or via unbind().`;
         }
         const e = new Error(errMsg);
