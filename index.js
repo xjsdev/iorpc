@@ -357,6 +357,9 @@
     module.exports.default = iorpc;
   } else if (typeof define === 'function') define(() => {
     return iorpc;
-  });else (typeof self !== 'undefined' ? self : this).iorpc = iorpc; // browser export
+  });else {
+    const _self = typeof self !== 'undefined' ? self : this;
+    if (typeof _self === 'object') _self.iorpc = iorpc; // browser export
+  }
   return iorpc;
 })();
