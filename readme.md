@@ -1,20 +1,20 @@
 # ioRPC
 
-`ioRPC`is a lightweight module for remote asynchronous function calls between different scripts using various transports. It enables seamless invocation of remote APIs and handling of responses with minimal configuration. You can use it to call JavaScript functions running on another machine, in Node.js, or directly in the browser.
+`ioRPC` is a lightweight module for remote asynchronous function calls between different scripts using various transports. It enables seamless invocation of remote APIs and handling of responses with minimal configuration. You can use it to call JavaScript functions running on another machine, in Node.js, or directly in the browser.
 
-It’s especially useful for smooth communication between different execution contexts (like a browser window and a Web Worker). A standout feature is its ability to serialize **functions as arguments or return values**, making it easy to implement things like real-time progress updates via callbacks.
+It's especially useful for smooth communication between different execution contexts (like a browser window and a Web Worker). A standout feature is its ability to serialize **functions as arguments or return values**, making it easy to implement things like real-time progress updates via callbacks.
 
 ---
 
-## ✅ Why `ioRPC` is Great
+## Why `ioRPC` is Great
 
-### 🔗 Transparent Remote Function Calls
+### Transparent Remote Function Calls
 Call remote functions just like local ones:
 ```js
 await remote.add(1, 2)
 ```
 
-### 🔄 Function Serialization
+### Function Serialization
 You can pass functions as arguments and even receive functions as return values:
 
 ```js
@@ -22,19 +22,19 @@ let fn = await remote.getCallback()
 await fn("hello")
 ```
 
-### 🔌 Pluggable Transport
+### Pluggable Transport
 Use any transport — WebSocket, MessagePort, iframe, or even `window.postMessage`.
 
-### ⚙️ Simple API
+### Simple API
 Create a local/remote pair with a very minimal setup.
 
-### 🧩 Works Everywhere
+### Works Everywhere
 Use in browser apps, Node.js, workers, iframes — anywhere messages can be sent.
 
 ---
 
-## 🧠 Real-World Example: UI + Web Worker
-### 🟦 Without `ioRPC`:
+## Real-World Example: UI + Web Worker
+### Without `ioRPC`:
 You'd have to manually:
 
 - serialize messages to `postMessage`
@@ -49,7 +49,7 @@ Too much boilerplate.
 
 ---
 
-### ⚡️ With `ioRPC`:
+### With `ioRPC`:
 #### UI (main window)
 
 ```html
@@ -89,7 +89,7 @@ local.processData = async function(data, onProgress) {
 }
 ```
 ---
-### 🚀 Highlights
+### Highlights
 - No manual message/event plumbing
 
 - You can pass onProgress() callback from UI to worker
@@ -511,12 +511,15 @@ const arrowFinction = () => {
 
 ### Broadcasting remote errors RemoteError:
 
-Use `try...catch` to catch a remote error.
+Use `try...catch` to catch a remote error. This works for both synchronous throws and rejected Promises returned from local functions — if a local function returns a rejected Promise, the error is automatically forwarded to the caller on the remote side.
 
 ```javascript
 const localApi = {
   functionWithError() {
     const a = b + 1 // <- /wsHost.js:37:15
+  },
+  async functionWithRejectedPromise() {
+    throw new Error('something went wrong') // rejected promise — also forwarded
   },
 }
 /* ... */
@@ -551,4 +554,3 @@ Distributed under the MIT License. See `LICENSE` for more information.
 IoRPC comes with ABSOLUTELY NO WARRANTY.
 
 Parashchuk Oleksandr<span><a href="https://www.linkedin.com/in/oleksandr-parashchuk-1a5951165/"><img src="https://linkedin.com/favicon.ico" alt="linkedin.com" width="16"/></a></span> © 2025
-

@@ -271,6 +271,13 @@
             Promise.resolve(retCb).then(ret => {
               noWait = true;
               remoteApi[message.cbId](ret);
+            }).catch(e => {
+              noWait = true;
+              if (e instanceof Error) {
+                remoteApi.iorpcThrowError(message.cbId, e.message, e.stack);
+              } else {
+                remoteApi.iorpcThrowError(message.cbId, e, false);
+              }
             });
           }
         }
