@@ -67,22 +67,40 @@
    *                                                If false, remote errors will be replaced with a generic message.
    * @param {boolean} [options.injectToThis=true] - If true, 'this' inside a function will be replaced with the iorpc object.
    *                                                Useful for context-aware APIs.
+   * @param {boolean} [options.ignoreCallbackUnavailable=false] - If true, missing-callback errors are ignored.
+   * @param {number} [options.callTimeout=0] - Milliseconds before a pending remote call is rejected with
+   *                                           an Error whose `code === 'IORPC_TIMEOUT'`. `0` disables timers (default).
+   * @param {function} [options.cbIdGenerator] - Custom callback-id generator `() => number|string`.
+   *                                             Defaults to a random integer. Collision check against the local map remains.
+   * @param {boolean} [options.taggedPackets=false] - If true, packets carry an explicit `kind: 'call'|'cb'` and routing
+   *                                                  uses it instead of the isNaN heuristic. Both sides must match. Default keeps
+   *                                                  the wire-format identical to 9.2.2.
+   * @param {function} [options.onTrim] - Called as `(removedIds: Array)` whenever clbsTrim evicts entries.
    *
-   * @returns {{ remoteApi: object, routeInput: function, pending: function }} - Returns an object with:
+   * @returns {{ remoteApi: object, routeInput: function, pending: function, rejectAll: function, bindings: function }}
    *    - `remoteApi`: proxy API to call remote functions,
    *    - `routeInput`: function to pass incoming messages from the other side,
-   *    - `pending`: returns the size of the waiting list to check if it is overflowing.
+   *    - `pending`: returns the size of the waiting list to check if it is overflowing,
+   *    - `rejectAll(err?)`: rejects all pending response promises and clears bindings (use on transport close),
+   *    - `bindings()`: returns `{ calls, callbacks }` diagnostic breakdown of `pending`.
    */
   const createIorpc = (sendFn, localApi = {}, {
     maxPendingResponses = 10000,
     allowNestedFunctions = false,
     exposeErrors = true,
     injectToThis = true,
-    ignoreCallbackUnavailable = false
+    ignoreCallbackUnavailable = false,
+    callTimeout = 0,
+    cbIdGenerator = null,
+    taggedPackets = false,
+    onTrim = null
   }) => {
     const clbs = {};
     let trimWarningFired = false;
     let noWait = false;
+    // taggedPackets: set right before invoking a remote callback wrapper, so the
+    // outgoing packet is tagged kind:'cb'. Reset after each remoteApi access.
+    let cbInvoke = false;
     let pending = 0;
     const clbsTrim = () => {
       if (!trimWarningFired) {
@@ -91,14 +109,20 @@
       }
       const clbsArr = Object.values(clbs);
       clbsArr.sort((a, b) => a.lastAck - b.lastAck);
-      clbsArr.slice(0, pending - maxPendingResponses).map(v => v.cbId).forEach(cbId => {
+      const removed = clbsArr.slice(0, pending - maxPendingResponses).map(v => v.cbId);
+      removed.forEach(cbId => {
         pending--;
         delete clbs[cbId];
       });
+      if (onTrim && removed.length) {
+        try {
+          onTrim(removed);
+        } catch (e) {/* user callback must not break trimming */}
+      }
     };
     const genCbid = () => {
       while (true) {
-        const cbId = Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
+        const cbId = cbIdGenerator ? cbIdGenerator() : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
         if (cbId in clbs) continue;
         return cbId;
       }
@@ -113,6 +137,10 @@
           noWait = true;
           return remoteApi;
         } else {
+          // Capture and reset the callback-invoke flag at access time: the cb
+          // wrapper sets it immediately before reading remoteApi[cbId].
+          const isCbInvoke = cbInvoke;
+          cbInvoke = false;
           return function (...args) {
             const packet = {
               apiFunc: thisArg,
@@ -120,6 +148,12 @@
               args,
               argsTransform: allowNestedFunctions ? {} : []
             };
+            // taggedPackets: mark whether apiFunc is a named method call or a callback id.
+            // Added only when the option is enabled so the default wire-format stays
+            // byte-identical to 9.2.2.
+            if (taggedPackets) {
+              packet.kind = isCbInvoke ? 'cb' : 'call';
+            }
             if (!noWait) packet.cbId = genCbid();
             if (allowNestedFunctions) {
               recuFilter(args, packet.argsTransform, resolve => {
@@ -159,18 +193,36 @@
               const delayPromise = new Promise((resolve, reject) => {
                 if (pending > maxPendingResponses) clbsTrim();
                 pending++;
+                let timer = null;
+                if (callTimeout > 0) {
+                  timer = setTimeout(() => {
+                    if (!(packet.cbId in clbs)) return;
+                    delete clbs[packet.cbId];
+                    pending--;
+                    // free the mirror record on the other side, if any
+                    noWait = true;
+                    remoteApi.iorpcUnbind(packet.cbId);
+                    const err = new Error('iorpc: call timeout');
+                    err.code = 'IORPC_TIMEOUT';
+                    reject(err);
+                  }, callTimeout);
+                  if (timer && typeof timer.unref === 'function') timer.unref();
+                }
                 clbs[packet.cbId] = {
                   resolve: arg => {
+                    if (timer) clearTimeout(timer);
                     delete clbs[packet.cbId];
                     pending--;
                     return resolve(arg);
                   },
                   reject,
+                  timer,
                   cbId: packet.cbId,
                   lastAck: Date.now()
                 };
               });
               return delayPromise.catch(e => {
+                if (e && e.code === 'IORPC_TIMEOUT') throw e;
                 let err = e;
                 if (e instanceof Error) {
                   err = new RemoteError(e.stack, e.message);
@@ -190,6 +242,8 @@
     const routeInput = message => {
       if (message.apiFunc === 'iorpcThrowError') {
         const [cbId, e, stack] = message.args;
+        const rec = clbs[cbId];
+        if (rec && rec.timer) clearTimeout(rec.timer);
         if (stack) {
           const err = new Error(e);
           err.stack = stack;
@@ -202,12 +256,25 @@
         return;
       }
       if (message.apiFunc === 'iorpcUnbind') {
+        const rec = clbs[message.args[0]];
+        if (rec && rec.timer) clearTimeout(rec.timer);
         pending--;
         delete clbs[message.args[0]];
         return;
       }
       let fn;
-      if (message.apiFunc in localApi) {
+      // With taggedPackets both sides agree on routing via `kind`.
+      // A 'cb' packet must never resolve a localApi method, and vice-versa.
+      if (taggedPackets && (message.kind === 'call' || message.kind === 'cb')) {
+        if (message.kind === 'call') {
+          if (message.apiFunc in localApi) fn = localApi[message.apiFunc];
+        } else {
+          if (message.apiFunc in clbs) {
+            clbs[message.apiFunc].lastAck = Date.now();
+            fn = clbs[message.apiFunc].resolve;
+          }
+        }
+      } else if (message.apiFunc in localApi) {
         fn = localApi[message.apiFunc];
       } else {
         if (message.apiFunc in clbs) {
@@ -220,6 +287,7 @@
           recuPatch(message.argsTransform, message.args, (at, a, k) => {
             const cbId = a[k];
             a[k] = function (...args) {
+              cbInvoke = true;
               return remoteApi[cbId](...args);
             };
             a[k].unbind = () => {
@@ -231,6 +299,7 @@
           for (let i of message.argsTransform) {
             const cbId = message.args[i];
             message.args[i] = function (...args) {
+              cbInvoke = true;
               return remoteApi[cbId](...args);
             };
             message.args[i].unbind = () => {
@@ -266,10 +335,12 @@
         if (suc) {
           if (message.cbId === false) return;
           if (retCb instanceof Function || typeof retCb === "function") {
+            cbInvoke = true;
             remoteApi[message.cbId](retCb); // function as return
           } else {
             Promise.resolve(retCb).then(ret => {
               noWait = true;
+              cbInvoke = true;
               remoteApi[message.cbId](ret);
             }).catch(e => {
               noWait = true;
@@ -284,7 +355,9 @@
       } else {
         noWait = true;
         let errMsg;
-        if (isNaN(message.apiFunc)) {
+        // Prefer the explicit kind tag when available; fall back to the isNaN heuristic.
+        const isCallback = taggedPackets && (message.kind === 'cb' || message.kind === 'call') ? message.kind === 'cb' : !isNaN(message.apiFunc);
+        if (!isCallback) {
           errMsg = `Function '${message.apiFunc}' is not registered for the iorpc API. Please verify it is properly defined and exposed.`;
         } else {
           if (ignoreCallbackUnavailable) return;
@@ -294,10 +367,45 @@
         remoteApi.iorpcThrowError(message.cbId, e.message, e.stack);
       }
     };
+    /**
+     * Reject every pending response promise and clear all bindings.
+     * Used when the transport dies (e.g. ws 'close'). Sends nothing to the wire.
+     */
+    const rejectAll = (err = new Error('iorpc: transport closed')) => {
+      for (const cbId of Object.keys(clbs)) {
+        const rec = clbs[cbId];
+        if (rec && rec.timer) clearTimeout(rec.timer);
+        if (rec && typeof rec.reject === 'function') {
+          try {
+            rec.reject(err);
+          } catch (e) {/* ignore */}
+        }
+        delete clbs[cbId];
+      }
+      pending = 0;
+    };
+    /**
+     * Diagnostic breakdown of `pending`:
+     *  - calls: response waiters (have a reject handler)
+     *  - callbacks: stored inbound callbacks (resolve-only records)
+     */
+    const bindings = () => {
+      let calls = 0;
+      let callbacks = 0;
+      for (const cbId of Object.keys(clbs)) {
+        if (typeof clbs[cbId].reject === 'function') calls++;else callbacks++;
+      }
+      return {
+        calls,
+        callbacks
+      };
+    };
     return {
       remoteApi /* Object with remote functions */,
       routeInput /* Function to handle incoming messages */,
-      pending: () => pending
+      pending: () => pending,
+      rejectAll,
+      bindings
     };
   };
   class RemoteError extends Error {
@@ -349,13 +457,17 @@
       const {
         routeInput,
         remoteApi,
-        pending
+        pending,
+        rejectAll,
+        bindings
       } = createIorpc(send, local, options);
       on(routeInput);
       return {
         local,
         remote: remoteApi,
-        pending
+        pending,
+        rejectAll,
+        bindings
       };
     }
   };

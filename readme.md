@@ -417,12 +417,21 @@ It should accept a callback which will receive parsed message objects.
 - `exposeErrors: boolean = true` – If true, forwards full remote error details (like stack traces). If false, replaces them with a generic message.
 - `injectToThis: boolean = true` – If true, replaces this inside called functions with `this.remoteApi`.
 - `ignoreCallbackUnavailable: boolean = false` – If true, errors due to missing callbacks will be ignored. Useful when integrating multiple interfaces over a single channel.
+- `callTimeout: number = 0` – Milliseconds to wait for a remote response before rejecting the call. `0` disables timeouts (default, no timers — identical to previous behaviour). On timeout the promise rejects with an `Error` whose `code === 'IORPC_TIMEOUT'`, the waiting entry is removed (`pending` decremented), and an `unbind` is sent to the other side so it can release its mirror record. `noWait` calls are never timed out.
+- `cbIdGenerator: () => number|string` – Optional custom generator for callback ids. Defaults to a random integer. The internal collision check against the local map is always applied. If you return **string** ids, you are responsible for ensuring they never clash with your `local` method names; pair it with `taggedPackets: true` for reliable routing.
+- `taggedPackets: boolean = false` – If true, each packet carries an explicit `kind: 'call' | 'cb'` field and `routeInput` routes by it instead of the `isNaN(apiFunc)` heuristic. **Both sides must use the same value.** Default (`false`) keeps the wire-format byte-identical to the previous version; the `kind` field is only added when enabled, so an older peer simply ignores it.
+- `onTrim: (removedIds: Array) => void` – Optional callback invoked whenever `maxPendingResponses` trimming evicts entries, receiving the list of removed callback ids. Useful for diagnosing binding leaks.
 
 `Return` - An object with the following properties:
 - `remote: Object` – A proxy object. Accessing `remote.someFunction()` will trigger a remote call to `someFunction` on the other side.
 - `local: Object` – The original local API passed (can be extended dynamically).
 - `pending: Function` – Returns the current number of active, bound remote calls (i.e., the wait queue size).
   Useful to monitor memory usage or detect forgotten `unbind()` calls.
+- `rejectAll: Function` – `rejectAll(err = new Error('iorpc: transport closed')): void`. Rejects every pending response promise with `err`, drops all stored inbound callbacks, and resets `pending` to `0`. Sends **nothing** to the transport (intended for use when the transport is already dead). Example:
+  ```js
+  ws.on('close', () => api.rejectAll(new Error('socket closed')))
+  ```
+- `bindings: Function` – `bindings(): { calls: number, callbacks: number }`. Diagnostic breakdown of `pending` into response waiters (`calls`) and stored inbound callbacks (`callbacks`). Helpful to detect forgotten `unbind()` calls. `calls + callbacks === pending()`.
 
 
 ### async function remote\[functionName](...args): any
@@ -546,6 +555,15 @@ try {
   console.log(e)
 }
 ```
+
+## Transport constraints
+
+`ioRPC` is transport-agnostic: it hands your `send` function a plain JSON-compatible **object** (`{ apiFunc, cbId, args, argsTransform }`, plus `kind` when `taggedPackets` is enabled) and expects your `on` to deliver the same object back on the other side. A few practical limits to keep in mind:
+
+- **Serialization/framing is your responsibility.** `send` receives an object — you decide how to encode it (e.g. `JSON.stringify`) and how to frame it on the wire. Mirror that in `on` (e.g. `JSON.parse`).
+- **One packet = one transport message.** Keep a 1:1 mapping where possible. If your transport has a maximum message size (for example a WebRTC `RTCDataChannel` is commonly limited to ~256 KB per message), wrap `send`/`on` in a chunking/reassembly framer. Large WebRTC payloads (SDP + a burst of ICE candidates) can exceed such limits.
+- **No binary streams.** `ioRPC` is not designed to carry binary blobs or media (video/files). Keep those on a separate dedicated channel and use `ioRPC` only for control/signaling messages.
+- **Dead transports.** `ioRPC` does not observe transport state. When the underlying socket/channel closes, call [`rejectAll(err)`](#function-pair-send-on-local-options--remote-local-pending) so pending promises reject instead of hanging forever, and optionally set `callTimeout` to bound individual calls.
 
 ## Copyright
 
