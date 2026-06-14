@@ -1,4 +1,4 @@
 import iorpc from './index.js';
-const { pair } = iorpc
-export { pair };
+const { pair, binChannel } = iorpc
+export { pair, binChannel };
 export default iorpc;

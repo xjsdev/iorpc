@@ -562,8 +562,163 @@ try {
 
 - **Serialization/framing is your responsibility.** `send` receives an object — you decide how to encode it (e.g. `JSON.stringify`) and how to frame it on the wire. Mirror that in `on` (e.g. `JSON.parse`).
 - **One packet = one transport message.** Keep a 1:1 mapping where possible. If your transport has a maximum message size (for example a WebRTC `RTCDataChannel` is commonly limited to ~256 KB per message), wrap `send`/`on` in a chunking/reassembly framer. Large WebRTC payloads (SDP + a burst of ICE candidates) can exceed such limits.
-- **No binary streams.** `ioRPC` is not designed to carry binary blobs or media (video/files). Keep those on a separate dedicated channel and use `ioRPC` only for control/signaling messages.
+- **Binary arguments.** `ioRPC` core does not encode binary blobs itself, but the bundled [`binChannel`](#binary-arguments-binchannel) adapter lets you pass `Buffer` / `TypedArray` / `ArrayBuffer` values directly as call arguments over a message-boundary transport (WebRTC `RTCDataChannel`, WebSocket, …) without base64 bloat, with zero-copy and automatic chunking for payloads above the channel limit. Raw media streams (continuous video) should still live on their own dedicated channel.
 - **Dead transports.** `ioRPC` does not observe transport state. When the underlying socket/channel closes, call [`rejectAll(err)`](#function-pair-send-on-local-options--remote-local-pending) so pending promises reject instead of hanging forever, and optionally set `callTimeout` to bound individual calls.
+
+# Binary arguments (`binChannel`)
+
+`binChannel` is a thin binary adapter shipped alongside `ioRPC`. It lets you pass
+**binary values** (`Buffer`, `Uint8Array` / any `TypedArray`, `ArrayBuffer`) as ordinary
+call arguments — at any depth inside objects/arrays — over a transport that preserves
+**message boundaries and order** (a reliable + ordered WebRTC `RTCDataChannel`, a
+WebSocket, etc.).
+
+What it does for you:
+
+- **No base64 bloat.** Binary parts travel as raw bytes, not JSON strings.
+- **Zero-copy.** On send, binary parts are sliced as views (`subarray`) — no intermediate
+  blob. On receive, you get a view (or an array of view-chunks), not a fresh copy.
+- **Automatic chunking.** A binary larger than `chunkSize` (default `200000`, below the
+  256 KB `RTCDataChannel` limit) is split across messages and reassembled transparently.
+- **Drop-in for `pair`.** It returns `{ send, on, reset }`, the exact shape `pair` expects.
+
+## How it works
+
+`binChannel` wraps a low-level **transport adapter** — an object you provide that just
+moves bytes:
+
+```js
+// transport contract:
+{
+  sendBin(u8 /* Uint8Array | Buffer */): void, // send one binary message
+  onBin(handler /* (msg) => void */): void,    // subscribe to incoming binary messages
+  maxMessageSize?: number                       // optional; auto-caps chunkSize
+}
+```
+
+`binChannel(transport, options)` then:
+
+1. On `send(packet)`: walks the packet, **extracts** every binary into a side list and
+   leaves a tiny `{ __bin: idx }` placeholder in a JSON *skeleton*. It sends the skeleton
+   as one message, then each binary as one or more chunk messages.
+2. On the receiving `on(handler)`: reassembles the skeleton with its binaries (order is
+   guaranteed by the transport) and calls `handler(packet)` with the original object —
+   binary placeholders replaced by the received bytes.
+
+`ioRPC` has already replaced your callback functions with numeric ids before `send` runs,
+so `binChannel` only ever sees numbers and binaries — it never touches your callbacks.
+
+## Example: send a file over a WebRTC DataChannel
+
+```js
+import { pair, binChannel } from 'iorpc';
+
+// --- transport adapter (Node, node-datachannel) ---
+const transport = {
+  sendBin: buf => dc.sendMessageBinary(buf),
+  onBin:   h   => dc.onMessage(m => { if (Buffer.isBuffer(m)) h(m); }),
+  maxMessageSize: dc.maxMessageSize()           // e.g. 262144
+};
+
+// --- browser adapter would be: ---
+// dc.binaryType = 'arraybuffer';
+// const transport = {
+//   sendBin: u8 => dc.send(u8),
+//   onBin:   h  => dc.addEventListener('message', e => h(e.data)), // e.data is ArrayBuffer
+//   maxMessageSize: dc.maxMessageSize
+// };
+
+const ch = binChannel(transport, {
+  chunkSize: 200000,    // chunk size / threshold (< maxMessageSize)
+  assembleBins: false,  // false: zero-copy view / { __binChunks } array; true: one Buffer
+  pendingTTL: 30000,    // ms to drop an unfinished packet (lost chunk / disconnect)
+  onError: e => console.warn('binChannel:', e.message)
+});
+
+// Receiver side — register an API that accepts a binary argument:
+pair({
+  send: ch.send,
+  on:   ch.on,
+  local: {
+    publishStatic(room, mtime, tarGz) {
+      // tarGz is a Buffer (or { __binChunks } when chunked, see below)
+      const bytes = tarGz.__binChunks ? Buffer.concat(tarGz.__binChunks) : tarGz;
+      fs.writeFileSync(`/srv/${room}.tar.gz`, bytes);
+      return { saved: true, size: bytes.length };
+    }
+  }
+});
+
+// Caller side:
+const { remote, rejectAll } = pair({ send: ch.send, on: ch.on });
+const tarGz = fs.readFileSync('public.tar.gz');         // ~211 KB Buffer
+const res = await remote.publishStatic('demo', Date.now(), tarGz);
+console.log(res); // { saved: true, size: 216064 }
+
+// On transport close: reject pending calls and clear half-received packets.
+dc.onClosed(() => { rejectAll(new Error('dc closed')); ch.reset(); });
+```
+
+Binaries can sit **anywhere** in the arguments, mixed with callbacks and scalars:
+
+```js
+await remote.upload(
+  {
+    meta:  { thumbnail: thumbBuffer, name: 'clip' },
+    parts: [{ id: 0, data: chunk0 }, { id: 1, data: chunk1 }]
+  },
+  progress => updateBar(progress)      // a normal ioRPC callback, untouched
+);
+```
+
+## Zero-copy: `assembleBins`
+
+By default (`assembleBins: false`) `binChannel` never builds one big buffer for a large
+binary:
+
+- a binary **≤ `chunkSize`** arrives as a single view (a `Buffer` in Node, a `Uint8Array`
+  in the browser);
+- a binary **> `chunkSize`** arrives as `{ __binChunks: [view, view, …], length }` — you
+  can stream the chunks straight to disk without merging:
+
+```js
+function save(bin, file) {
+  if (bin.__binChunks) for (const c of bin.__binChunks) file.write(c); // streamed, no merge
+  else file.write(bin);
+}
+```
+
+Set `assembleBins: true` if you prefer convenience over memory: every binary is delivered
+as one contiguous buffer (one extra copy).
+
+## Options
+
+| option         | default  | meaning                                                                 |
+| -------------- | -------- | ----------------------------------------------------------------------- |
+| `chunkSize`    | `200000` | Chunk size / threshold. Auto-capped to `maxMessageSize - 11` if given.  |
+| `assembleBins` | `false`  | `false`: zero-copy view / `{ __binChunks }`. `true`: one merged buffer. |
+| `pendingTTL`   | `30000`  | ms before an unfinished packet (lost chunk / disconnect) is dropped + `onError`. `0` disables. |
+| `onError`      | no-op    | `(err) => void` — decode or TTL errors.                                 |
+
+## Reliability notes
+
+- Requires a transport that **keeps message boundaries and order** (one `sendBin` = one
+  `onBin`, same order). Reliable + ordered `RTCDataChannel` and WebSocket qualify.
+- Concurrent / interleaved calls are safe: each logical packet is tracked by its own
+  `msgId`, so mixing a small command into a large transfer never corrupts either.
+- **Ordered output queue.** All messages of a packet are pushed to an internal queue and
+  drained into `sendBin` as one contiguous, in-order block. Even if your `sendBin`
+  synchronously calls `send` again (reentrancy), the new packet is appended to the tail
+  rather than wedged between another packet's chunks — output order is always preserved.
+- **Send failures propagate.** If `sendBin` throws (e.g. channel closed mid-flight, or a
+  message exceeds the transport limit), the exception is re-thrown from `send` so the
+  caller learns about it. The failed message stays at the head of the queue (no gap, no
+  loss); a later `send` resumes draining from that point. On a real disconnect call
+  `ch.reset()` — it clears both half-received inbound packets and the undelivered outbound
+  queue.
+- On disconnect call `ch.reset()` (clears half-received packets) together with `ioRPC`'s
+  `rejectAll(err)` (rejects pending promises). With `pendingTTL > 0`, stalled packets are
+  also dropped automatically.
 
 ## Copyright
 

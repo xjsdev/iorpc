@@ -1,6 +1,6 @@
 {
   "name": "iorpc",
-  "version": "9.2.3",
+  "version": "9.2.4",
   "keywords": [
     "rpc",
     "callback",
@@ -13,6 +13,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/xjsdev/iorpc.git"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   },
   "exports": {
     ".": {

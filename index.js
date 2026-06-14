@@ -243,13 +243,16 @@
       if (message.apiFunc === 'iorpcThrowError') {
         const [cbId, e, stack] = message.args;
         const rec = clbs[cbId];
-        if (rec && rec.timer) clearTimeout(rec.timer);
+        // The waiter may be gone already (rejectAll on transport close, timeout, or a
+        // late/duplicate error packet). Ignore instead of throwing on undefined.
+        if (!rec) return;
+        if (rec.timer) clearTimeout(rec.timer);
         if (stack) {
           const err = new Error(e);
           err.stack = stack;
-          clbs[cbId].reject(err);
+          rec.reject(err);
         } else {
-          clbs[cbId].reject(e);
+          rec.reject(e);
         }
         pending--;
         delete clbs[cbId];
@@ -471,6 +474,206 @@
       };
     }
   };
+  // ─── binChannel ─────────────────────────────────────────────────────────────
+  // Бінарний слой між iorpc і DataChannel (zero-copy + чанкування). Ховає
+  // (де)серіалізацію packet з бінарними значеннями (Buffer/TypedArray/ArrayBuffer)
+  // поверх транспорту, що зберігає межі повідомлень і порядок (reliable+ordered).
+  //   transport = { sendBin(u8), onBin(handler), maxMessageSize? }
+  // Повертає { send, on, reset } — drop-in для pair({ send, on }).
+  const _hasBuffer = typeof Buffer !== 'undefined' && typeof Buffer.from === 'function';
+  const _isBin = v => v != null && (ArrayBuffer.isView(v) || v instanceof ArrayBuffer);
+  const _toU8 = v => v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  const _wrap = u8 => _hasBuffer ? Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength) : u8;
+  const _enc = new TextEncoder(),
+    _dec = new TextDecoder();
+  const _extract = (node, bins) => {
+    if (_isBin(node)) return {
+      __bin: bins.push(_toU8(node)) - 1
+    };
+    if (node && typeof node === 'object') {
+      const out = Array.isArray(node) ? [] : {};
+      for (const k of Object.keys(node)) out[k] = _extract(node[k], bins);
+      return out;
+    }
+    return node;
+  };
+  const _inject = (node, bins) => {
+    if (node && typeof node === 'object') {
+      if (node.__bin !== undefined && Object.keys(node).length === 1) return bins[node.__bin];
+      for (const k of Object.keys(node)) node[k] = _inject(node[k], bins);
+    }
+    return node;
+  };
+  const _finalize = (chunks, assemble) => {
+    if (chunks.length === 1 && !assemble) return _wrap(chunks[0]);
+    let len = 0;
+    for (const c of chunks) len += c.length;
+    if (!assemble) return {
+      __binChunks: chunks.map(_wrap),
+      length: len
+    };
+    const out = new Uint8Array(len);
+    let o = 0;
+    for (const c of chunks) {
+      out.set(c, o);
+      o += c.length;
+    }
+    return _wrap(out);
+  };
+  /**
+   * Create a binary adapter over a message-boundary transport.
+   *
+   * @param {object} transport - { sendBin(u8), onBin(handler), maxMessageSize? }
+   * @param {object} [opts]
+   * @param {number}  [opts.chunkSize=200000] - chunk size / threshold (< maxMessageSize).
+   * @param {boolean} [opts.assembleBins=false] - false: zero-copy view / { __binChunks } array;
+   *                                              true: merge into one contiguous buffer (copy).
+   * @param {number}  [opts.pendingTTL=30000] - ms to drop an unfinished packet (disconnect / lost chunk). 0 disables.
+   * @param {function}[opts.onError] - (err) => void: decode / TTL errors.
+   * @returns {{ send: function, on: function, reset: function }}
+   */
+  const binChannel = (transport, {
+    chunkSize = 200000,
+    assembleBins = false,
+    pendingTTL = 30000,
+    onError = () => {}
+  } = {}) => {
+    const HEAD = 11; // [type:1][msgId:4][binIdx:2][seq:2][total:2]
+    const max = transport.maxMessageSize;
+    const chunk = Math.max(1, Math.min(chunkSize, (max || Infinity) - HEAD));
+    let msgId = 0;
+    const pending = new Map();
+
+    // Вихідна черга: гарантує, що повідомлення кожного packet виходять у transport.sendBin
+    // суцільним блоком і у порядку постановки — навіть якщо sendBin реентрантно
+    // викличе send() ще раз (тоді новий packet просто додається в хвіст, не вклинюючись).
+    // Якщо sendBin кидає (обрив / over-limit), повідомлення лишається в голові черги
+    // (не губиться, без дірки), sending скидається, а виняток летить наверх до викликача.
+    const outQ = [];
+    let sending = false;
+    const flushOut = () => {
+      if (sending) return;
+      sending = true;
+      try {
+        while (outQ.length) {
+          transport.sendBin(outQ[0]); // peek: видаляємо лише після успіху
+          outQ.shift();
+        }
+      } finally {
+        sending = false;
+      }
+    };
+    const send = packet => {
+      const bins = [];
+      const skel = _enc.encode(JSON.stringify(_extract(packet, bins)));
+      const id = msgId = msgId + 1 >>> 0;
+      const h = new Uint8Array(7 + skel.length),
+        dv = new DataView(h.buffer);
+      dv.setUint8(0, 0);
+      dv.setUint32(1, id);
+      dv.setUint16(5, bins.length);
+      h.set(skel, 7);
+      outQ.push(_wrap(h));
+      for (let bi = 0; bi < bins.length; bi++) {
+        const b = bins[bi],
+          total = Math.max(1, Math.ceil(b.length / chunk));
+        for (let seq = 0; seq < total; seq++) {
+          const part = b.subarray(seq * chunk, (seq + 1) * chunk);
+          const m = new Uint8Array(HEAD + part.length),
+            mv = new DataView(m.buffer);
+          mv.setUint8(0, 1);
+          mv.setUint32(1, id);
+          mv.setUint16(5, bi);
+          mv.setUint16(7, seq);
+          mv.setUint16(9, total);
+          m.set(part, HEAD);
+          outQ.push(_wrap(m));
+        }
+      }
+      flushOut();
+    };
+    const drop = (id, err) => {
+      const p = pending.get(id);
+      if (!p) return;
+      if (p.timer) clearTimeout(p.timer);
+      pending.delete(id);
+      if (err) onError(err);
+    };
+    const arm = id => {
+      if (!pendingTTL) return null;
+      const t = setTimeout(() => drop(id, new Error('binChannel: pending timeout msgId=' + id)), pendingTTL);
+      if (t && typeof t.unref === 'function') t.unref();
+      return t;
+    };
+    const flush = id => {
+      const p = pending.get(id);
+      drop(id);
+      p.handler(_inject(p.skeleton, p.bins));
+    };
+    const on = handler => {
+      transport.onBin(raw => {
+        try {
+          const u8 = _toU8(raw);
+          const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+          if (dv.getUint8(0) === 0) {
+            const id = dv.getUint32(1),
+              count = dv.getUint16(5);
+            const skeleton = JSON.parse(_dec.decode(u8.subarray(7)));
+            if (!count) return handler(_inject(skeleton, []));
+            if (pending.has(id)) drop(id);
+            pending.set(id, {
+              skeleton,
+              bins: new Array(count),
+              parts: {},
+              needed: count,
+              handler,
+              timer: arm(id)
+            });
+          } else {
+            const id = dv.getUint32(1),
+              bi = dv.getUint16(5),
+              seq = dv.getUint16(7),
+              total = dv.getUint16(9);
+            const p = pending.get(id);
+            if (!p) return;
+            const payload = u8.subarray(HEAD);
+            if (total === 1) {
+              if (p.bins[bi] === undefined) p.needed--;
+              p.bins[bi] = _finalize([payload], assembleBins);
+            } else {
+              const slot = p.parts[bi] || (p.parts[bi] = {
+                arr: new Array(total),
+                got: 0
+              });
+              if (slot.arr[seq] === undefined) {
+                slot.arr[seq] = payload;
+                slot.got++;
+              }
+              if (slot.got === total) {
+                p.bins[bi] = _finalize(slot.arr, assembleBins);
+                p.needed--;
+              }
+            }
+            if (p.needed === 0) flush(id);
+          }
+        } catch (e) {
+          onError(e);
+        }
+      });
+    };
+
+    // Чистить недозібрані вхідні packet-и ТА недовідправлену вихідну чергу (обрив каналу).
+    const reset = () => {
+      for (const id of [...pending.keys()]) drop(id);
+      outQ.length = 0;
+    };
+    return {
+      send,
+      on,
+      reset
+    };
+  };
+  iorpc.binChannel = binChannel;
   if (typeof exports !== 'undefined') {
     module.exports = iorpc;
     module.exports.default = iorpc;
