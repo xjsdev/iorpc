@@ -562,7 +562,7 @@ try {
 
 - **Serialization/framing is your responsibility.** `send` receives an object — you decide how to encode it (e.g. `JSON.stringify`) and how to frame it on the wire. Mirror that in `on` (e.g. `JSON.parse`).
 - **One packet = one transport message.** Keep a 1:1 mapping where possible. If your transport has a maximum message size (for example a WebRTC `RTCDataChannel` is commonly limited to ~256 KB per message), wrap `send`/`on` in a chunking/reassembly framer. Large WebRTC payloads (SDP + a burst of ICE candidates) can exceed such limits.
-- **Binary arguments.** `ioRPC` core does not encode binary blobs itself, but the bundled [`binChannel`](#binary-arguments-binchannel) adapter lets you pass `Buffer` / `TypedArray` / `ArrayBuffer` values directly as call arguments over a message-boundary transport (WebRTC `RTCDataChannel`, WebSocket, …) without base64 bloat, with zero-copy and automatic chunking for payloads above the channel limit. Raw media streams (continuous video) should still live on their own dedicated channel.
+- **Binary arguments.** `ioRPC` core does not encode binary blobs itself, but the bundled [`binChannel`](#binary-arguments-binchannel) adapter lets you pass `Buffer` / `TypedArray` / `ArrayBuffer` values directly as call arguments over a message-boundary transport (WebRTC `RTCDataChannel`, WebSocket, …) without base64 bloat, with zero-copy and automatic chunking for payloads above the channel limit — for binaries and for large plain JSON packets alike. Raw media streams (continuous video) should still live on their own dedicated channel.
 - **Dead transports.** `ioRPC` does not observe transport state. When the underlying socket/channel closes, call [`rejectAll(err)`](#function-pair-send-on-local-options--remote-local-pending) so pending promises reject instead of hanging forever, and optionally set `callTimeout` to bound individual calls.
 
 # Binary arguments (`binChannel`)
@@ -580,6 +580,10 @@ What it does for you:
   blob. On receive, you get a view (or an array of view-chunks), not a fresh copy.
 - **Automatic chunking.** A binary larger than `chunkSize` (default `200000`, below the
   256 KB `RTCDataChannel` limit) is split across messages and reassembled transparently.
+- **Large plain packets too.** The JSON skeleton itself is chunked when it does not fit into
+  one message, so big non-binary results (e.g. a ~1 MB `exchangeInfo` object, hundreds of KB
+  of JSON) go through a DataChannel just like binaries. No transport message ever exceeds
+  `chunkSize + 11` bytes.
 - **Drop-in for `pair`.** It returns `{ send, on, reset }`, the exact shape `pair` expects.
 
 ## How it works
@@ -600,13 +604,34 @@ moves bytes:
 
 1. On `send(packet)`: walks the packet, **extracts** every binary into a side list and
    leaves a tiny `{ __bin: idx }` placeholder in a JSON *skeleton*. It sends the skeleton
-   as one message, then each binary as one or more chunk messages.
+   as one message (or as several chunk messages if it is larger than the chunk limit),
+   then each binary as one or more chunk messages.
 2. On the receiving `on(handler)`: reassembles the skeleton with its binaries (order is
    guaranteed by the transport) and calls `handler(packet)` with the original object —
    binary placeholders replaced by the received bytes.
 
 `ioRPC` has already replaced your callback functions with numeric ids before `send` runs,
 so `binChannel` only ever sees numbers and binaries — it never touches your callbacks.
+
+## Wire format
+
+Every message starts with a 1-byte type; all integers are big-endian.
+
+| type | meaning          | layout                                                                 |
+| ---- | ---------------- | ---------------------------------------------------------------------- |
+| `0`  | whole skeleton   | `[0][msgId:u32][binsCount:u16]` + UTF-8 JSON                           |
+| `1`  | binary chunk     | `[1][msgId:u32][binIdx:u16][seq:u16][total:u16]` + raw bytes           |
+| `2`  | skeleton chunk   | `[2][msgId:u32][binsCount:u16][seq:u16][total:u16]` + part of the JSON |
+
+- Type `0` is used whenever `7 + skeletonBytes <= chunk + 11`; it is byte-identical to
+  earlier versions, so small packets stay compatible with older receivers.
+- Type `2` (since 9.3.0) is used only for skeletons that do not fit. A receiver older than
+  9.3.0 silently ignores such packets (the call then ends by the caller's `callTimeout`),
+  so both peers must be upgraded before sending large plain packets.
+- All type `2` chunks of a packet precede its type `1` chunks, and the whole packet is
+  emitted as one contiguous block.
+- `binsCount`, skeleton chunk count and per-binary chunk count are `u16`: exceeding
+  `65535` makes `send` throw a `RangeError` before anything is queued.
 
 ## Example: send a file over a WebRTC DataChannel
 
@@ -695,10 +720,10 @@ as one contiguous buffer (one extra copy).
 
 | option         | default  | meaning                                                                 |
 | -------------- | -------- | ----------------------------------------------------------------------- |
-| `chunkSize`    | `200000` | Chunk size / threshold. Auto-capped to `maxMessageSize - 11` if given.  |
+| `chunkSize`    | `200000` | Chunk size / threshold for binaries and large skeletons. Auto-capped to `maxMessageSize - 11` if given. |
 | `assembleBins` | `false`  | `false`: zero-copy view / `{ __binChunks }`. `true`: one merged buffer. |
-| `pendingTTL`   | `30000`  | ms before an unfinished packet (lost chunk / disconnect) is dropped + `onError`. `0` disables. |
-| `onError`      | no-op    | `(err) => void` — decode or TTL errors.                                 |
+| `pendingTTL`   | `30000`  | ms before an unfinished packet (lost binary or skeleton chunk / disconnect) is dropped + `onError`. `0` disables. |
+| `onError`      | no-op    | `(err) => void` — decode, malformed-chunk or TTL errors.                |
 
 ## Reliability notes
 
@@ -716,7 +741,8 @@ as one contiguous buffer (one extra copy).
   loss); a later `send` resumes draining from that point. On a real disconnect call
   `ch.reset()` — it clears both half-received inbound packets and the undelivered outbound
   queue.
-- On disconnect call `ch.reset()` (clears half-received packets) together with `ioRPC`'s
+- On disconnect call `ch.reset()` (clears half-received packets, including partially received
+  skeletons) together with `ioRPC`'s
   `rejectAll(err)` (rejects pending promises). With `pendingTTL > 0`, stalled packets are
   also dropped automatically.
 

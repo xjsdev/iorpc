@@ -538,9 +538,16 @@
     pendingTTL = 30000,
     onError = () => {}
   } = {}) => {
-    const HEAD = 11; // [type:1][msgId:4][binIdx:2][seq:2][total:2]
+    // Wire-формат (кожне повідомлення ≤ chunk + HEAD байт):
+    //   type 0 — скелет цілком:   [0][msgId:u32][binsCount:u16] + JSON
+    //   type 1 — шматок бінара:   [1][msgId:u32][binIdx:u16][seq:u16][total:u16] + байти
+    //   type 2 — шматок скелета:  [2][msgId:u32][binsCount:u16][seq:u16][total:u16] + частина JSON
+    // type 2 вживається лише коли type 0 не вміщується у chunk + HEAD.
+    const HEAD = 11,
+      SKEL_HEAD = 7,
+      U16 = 0xffff;
     const max = transport.maxMessageSize;
-    const chunk = Math.max(1, Math.min(chunkSize, (max || Infinity) - HEAD));
+    const chunk = Math.max(1, Math.floor(Math.min(chunkSize, (max || Infinity) - HEAD)));
     let msgId = 0;
     const pending = new Map();
 
@@ -566,17 +573,43 @@
     const send = packet => {
       const bins = [];
       const skel = _enc.encode(JSON.stringify(_extract(packet, bins)));
+      // Ліміти u16 перевіряємо ДО постановки в outQ — щоб не лишити в черзі пів-packet.
+      if (bins.length > U16) throw new RangeError('binChannel: too many binary values in packet: ' + bins.length + ' > ' + U16);
+      const skelTotal = SKEL_HEAD + skel.length > chunk + HEAD ? Math.ceil(skel.length / chunk) : 0;
+      if (skelTotal > U16) throw new RangeError('binChannel: skeleton too large: ' + skel.length + ' bytes needs ' + skelTotal + ' chunks > ' + U16);
+      const binTotals = bins.map((b, bi) => {
+        const t = Math.max(1, Math.ceil(b.length / chunk));
+        if (t > U16) throw new RangeError('binChannel: binary #' + bi + ' too large: ' + b.length + ' bytes needs ' + t + ' chunks > ' + U16);
+        return t;
+      });
       const id = msgId = msgId + 1 >>> 0;
-      const h = new Uint8Array(7 + skel.length),
-        dv = new DataView(h.buffer);
-      dv.setUint8(0, 0);
-      dv.setUint32(1, id);
-      dv.setUint16(5, bins.length);
-      h.set(skel, 7);
-      outQ.push(_wrap(h));
+      if (!skelTotal) {
+        // скелет вміщується: формат type 0, побайтово як у попередніх версіях
+        const h = new Uint8Array(SKEL_HEAD + skel.length),
+          dv = new DataView(h.buffer);
+        dv.setUint8(0, 0);
+        dv.setUint32(1, id);
+        dv.setUint16(5, bins.length);
+        h.set(skel, SKEL_HEAD);
+        outQ.push(_wrap(h));
+      } else {
+        // великий скелет: type 2 = [2][msgId:4][binsCount:2][seq:2][total:2] + частина JSON
+        for (let seq = 0; seq < skelTotal; seq++) {
+          const part = skel.subarray(seq * chunk, (seq + 1) * chunk);
+          const m = new Uint8Array(HEAD + part.length),
+            mv = new DataView(m.buffer);
+          mv.setUint8(0, 2);
+          mv.setUint32(1, id);
+          mv.setUint16(5, bins.length);
+          mv.setUint16(7, seq);
+          mv.setUint16(9, skelTotal);
+          m.set(part, HEAD);
+          outQ.push(_wrap(m));
+        }
+      }
       for (let bi = 0; bi < bins.length; bi++) {
         const b = bins[bi],
-          total = Math.max(1, Math.ceil(b.length / chunk));
+          total = binTotals[bi];
         for (let seq = 0; seq < total; seq++) {
           const part = b.subarray(seq * chunk, (seq + 1) * chunk);
           const m = new Uint8Array(HEAD + part.length),
@@ -615,10 +648,11 @@
         try {
           const u8 = _toU8(raw);
           const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-          if (dv.getUint8(0) === 0) {
+          const type = dv.getUint8(0);
+          if (type === 0) {
             const id = dv.getUint32(1),
               count = dv.getUint16(5);
-            const skeleton = JSON.parse(_dec.decode(u8.subarray(7)));
+            const skeleton = JSON.parse(_dec.decode(u8.subarray(SKEL_HEAD)));
             if (!count) return handler(_inject(skeleton, []));
             if (pending.has(id)) drop(id);
             pending.set(id, {
@@ -629,13 +663,72 @@
               handler,
               timer: arm(id)
             });
-          } else {
+          } else if (type === 2) {
+            const id = dv.getUint32(1),
+              count = dv.getUint16(5),
+              seq = dv.getUint16(7),
+              total = dv.getUint16(9);
+            let p = pending.get(id);
+            if (p && p.skel && (p.skel.total !== total || p.bins.length !== count)) {
+              drop(id);
+              throw new Error('binChannel: skeleton chunk header mismatch msgId=' + id);
+            }
+            if (seq >= total) {
+              drop(id);
+              throw new Error('binChannel: bad skeleton chunk seq=' + seq + ' total=' + total + ' msgId=' + id);
+            }
+            if (!p || !p.skel) {
+              if (p) drop(id); // застарілий запис з тим самим msgId (переповнення лічильника)
+              p = {
+                skeleton: undefined,
+                skel: {
+                  arr: new Array(total),
+                  got: 0,
+                  total,
+                  len: 0
+                },
+                bins: new Array(count),
+                parts: {},
+                needed: count,
+                handler,
+                timer: arm(id)
+              };
+              pending.set(id, p);
+            }
+            const s = p.skel;
+            if (s.arr[seq] === undefined) {
+              const c = u8.subarray(HEAD);
+              s.arr[seq] = c;
+              s.got++;
+              s.len += c.length;
+            }
+            if (s.got === total) {
+              const all = new Uint8Array(s.len);
+              let o = 0;
+              for (const c of s.arr) {
+                all.set(c, o);
+                o += c.length;
+              }
+              p.skel = null;
+              try {
+                p.skeleton = JSON.parse(_dec.decode(all));
+              } catch (e) {
+                drop(id);
+                throw e;
+              }
+              if (p.needed === 0) flush(id);
+            }
+          } else if (type === 1) {
             const id = dv.getUint32(1),
               bi = dv.getUint16(5),
               seq = dv.getUint16(7),
               total = dv.getUint16(9);
             const p = pending.get(id);
             if (!p) return;
+            if (bi >= p.bins.length || seq >= total) {
+              drop(id);
+              throw new Error('binChannel: bad bin chunk binIdx=' + bi + ' seq=' + seq + ' total=' + total + ' msgId=' + id);
+            }
             const payload = u8.subarray(HEAD);
             if (total === 1) {
               if (p.bins[bi] === undefined) p.needed--;
@@ -654,7 +747,9 @@
                 p.needed--;
               }
             }
-            if (p.needed === 0) flush(id);
+            if (p.needed === 0 && p.skeleton !== undefined) flush(id);
+          } else {
+            throw new Error('binChannel: unknown message type ' + type);
           }
         } catch (e) {
           onError(e);
