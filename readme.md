@@ -562,7 +562,7 @@ try {
 
 - **Serialization/framing is your responsibility.** `send` receives an object — you decide how to encode it (e.g. `JSON.stringify`) and how to frame it on the wire. Mirror that in `on` (e.g. `JSON.parse`).
 - **One packet = one transport message.** Keep a 1:1 mapping where possible. If your transport has a maximum message size (for example a WebRTC `RTCDataChannel` is commonly limited to ~256 KB per message), wrap `send`/`on` in a chunking/reassembly framer. Large WebRTC payloads (SDP + a burst of ICE candidates) can exceed such limits.
-- **Binary arguments.** `ioRPC` core does not encode binary blobs itself, but the bundled [`binChannel`](#binary-arguments-binchannel) adapter lets you pass `Buffer` / `TypedArray` / `ArrayBuffer` values directly as call arguments over a message-boundary transport (WebRTC `RTCDataChannel`, WebSocket, …) without base64 bloat, with zero-copy and automatic chunking for payloads above the channel limit — for binaries and for large plain JSON packets alike. Raw media streams (continuous video) should still live on their own dedicated channel.
+- **Binary arguments.** `ioRPC` core does not encode binary blobs itself, but the bundled [`binChannel`](#binary-arguments-binchannel) adapter lets you pass `Buffer` / `TypedArray` / `ArrayBuffer` values directly as call arguments over a message-boundary transport (WebRTC `RTCDataChannel`, WebSocket, …) without base64 bloat, with zero-copy and automatic chunking for payloads above the channel limit — for binaries, and (with `chunkSkeleton: 'auto'`) for large plain JSON packets too. Raw media streams (continuous video) should still live on their own dedicated channel.
 - **Dead transports.** `ioRPC` does not observe transport state. When the underlying socket/channel closes, call [`rejectAll(err)`](#function-pair-send-on-local-options--remote-local-pending) so pending promises reject instead of hanging forever, and optionally set `callTimeout` to bound individual calls.
 
 # Binary arguments (`binChannel`)
@@ -580,10 +580,12 @@ What it does for you:
   blob. On receive, you get a view (or an array of view-chunks), not a fresh copy.
 - **Automatic chunking.** A binary larger than `chunkSize` (default `200000`, below the
   256 KB `RTCDataChannel` limit) is split across messages and reassembled transparently.
-- **Large plain packets too.** The JSON skeleton itself is chunked when it does not fit into
-  one message, so big non-binary results (e.g. a ~1 MB `exchangeInfo` object, hundreds of KB
-  of JSON) go through a DataChannel just like binaries. No transport message ever exceeds
-  `chunkSize + 11` bytes.
+- **Large plain packets too (opt-in).** With `chunkSkeleton: 'auto'` (or `true`) the JSON
+  skeleton itself is chunked when it does not fit into one message, so big non-binary results
+  (e.g. a ~1 MB `exchangeInfo` object, hundreds of KB of JSON) go through a DataChannel just
+  like binaries, and no transport message exceeds `chunkSize + 11` bytes. By default
+  (`chunkSkeleton: false`) the skeleton is sent as one message, wire-compatible with every
+  earlier version — see [Skeleton chunking and compatibility](#skeleton-chunking-and-compatibility).
 - **Drop-in for `pair`.** It returns `{ send, on, reset }`, the exact shape `pair` expects.
 
 ## How it works
@@ -604,8 +606,8 @@ moves bytes:
 
 1. On `send(packet)`: walks the packet, **extracts** every binary into a side list and
    leaves a tiny `{ __bin: idx }` placeholder in a JSON *skeleton*. It sends the skeleton
-   as one message (or as several chunk messages if it is larger than the chunk limit),
-   then each binary as one or more chunk messages.
+   as one message (or, when `chunkSkeleton` allows it, as several chunk messages if it is
+   larger than the chunk limit), then each binary as one or more chunk messages.
 2. On the receiving `on(handler)`: reassembles the skeleton with its binaries (order is
    guaranteed by the transport) and calls `handler(packet)` with the original object —
    binary placeholders replaced by the received bytes.
@@ -622,16 +624,44 @@ Every message starts with a 1-byte type; all integers are big-endian.
 | `0`  | whole skeleton   | `[0][msgId:u32][binsCount:u16]` + UTF-8 JSON                           |
 | `1`  | binary chunk     | `[1][msgId:u32][binIdx:u16][seq:u16][total:u16]` + raw bytes           |
 | `2`  | skeleton chunk   | `[2][msgId:u32][binsCount:u16][seq:u16][total:u16]` + part of the JSON |
+| `3`  | hello            | `[3][0:u32][caps:u16][0:u16][0:u16]` (exactly 11 bytes, `caps` bit 0 = understands type `2`) |
 
-- Type `0` is used whenever `7 + skeletonBytes <= chunk + 11`; it is byte-identical to
-  earlier versions, so small packets stay compatible with older receivers.
-- Type `2` (since 9.3.0) is used only for skeletons that do not fit. A receiver older than
-  9.3.0 silently ignores such packets (the call then ends by the caller's `callTimeout`),
-  so both peers must be upgraded before sending large plain packets.
+- Type `0` carries the whole skeleton. With the default `chunkSkeleton: false` it is used for
+  skeletons of **any** size — byte-identical to 9.2.x.
+- Type `2` (since 9.3.0) is used only for skeletons that do not fit into `chunk + 11` bytes
+  **and** only when `chunkSkeleton` allows it (`true`, or `'auto'` after the peer's hello).
+- Type `3` (since 9.3.1) is sent once, before the first packet, only with `chunkSkeleton: 'auto'`
+  (and again after `reset()`).
+- Every receiver since 9.3.0 accepts types `0`, `1`, `2`; since 9.3.1 also `3`.
 - All type `2` chunks of a packet precede its type `1` chunks, and the whole packet is
   emitted as one contiguous block.
 - `binsCount`, skeleton chunk count and per-binary chunk count are `u16`: exceeding
   `65535` makes `send` throw a `RangeError` before anything is queued.
+
+## Skeleton chunking and compatibility
+
+`chunkSkeleton` controls whether a large JSON skeleton may be split into type `2` messages.
+Receivers older than 9.3.0 do not know type `2` and drop it **silently** — the call would then
+hang until the caller's `callTimeout`. Therefore it is off by default.
+
+| `chunkSkeleton` | sender behaviour | safe with peer |
+| --------------- | ---------------- | -------------- |
+| `false` (default) | skeleton always one type `0` message, wire-identical to 9.2.x | any version |
+| `'auto'` | sends a type `3` hello before its first packet; chunks only after the peer's hello (peer also on `'auto'`) arrived | any version (9.2.x ignores the hello silently; 9.3.0 reports it once via `onError` as `unknown message type 3`) |
+| `true` | always chunks, no hello (9.3.0 behaviour) | ≥ 9.3.0 only |
+
+With `'auto'` on both sides, the very first request of a connection goes unchunked (the peer's
+hello has not arrived yet); everything after the first reply, in both directions, is chunked.
+`reset()` forgets the peer's capabilities and repeats the hello before the next packet.
+
+```js
+// Node (server) and browser — both on >= 9.3.1:
+const ch = binChannel(transport, { chunkSkeleton: 'auto' });
+```
+
+Note: with `chunkSkeleton: false` a skeleton larger than the transport limit is sent as one
+oversized message, exactly as in 9.2.x; whether it gets through depends on the transport
+(node-datachannel throws above its real limit).
 
 ## Example: send a file over a WebRTC DataChannel
 
@@ -657,7 +687,8 @@ const ch = binChannel(transport, {
   chunkSize: 200000,    // chunk size / threshold (< maxMessageSize)
   assembleBins: false,  // false: zero-copy view / { __binChunks } array; true: one Buffer
   pendingTTL: 30000,    // ms to drop an unfinished packet (lost chunk / disconnect)
-  onError: e => console.warn('binChannel:', e.message)
+  chunkSkeleton: 'auto', // chunk large JSON skeletons once the peer confirms support
+  onError: e => console.warn('binChannel:', e.code, e.message)
 });
 
 // Receiver side — register an API that accepts a binary argument:
@@ -721,9 +752,10 @@ as one contiguous buffer (one extra copy).
 | option         | default  | meaning                                                                 |
 | -------------- | -------- | ----------------------------------------------------------------------- |
 | `chunkSize`    | `200000` | Chunk size / threshold for binaries and large skeletons. Auto-capped to `maxMessageSize - 11` if given. |
+| `chunkSkeleton`| `false`  | `false` / `'auto'` / `true` — chunking of large JSON skeletons, see [Skeleton chunking and compatibility](#skeleton-chunking-and-compatibility). |
 | `assembleBins` | `false`  | `false`: zero-copy view / `{ __binChunks }`. `true`: one merged buffer. |
 | `pendingTTL`   | `30000`  | ms before an unfinished packet (lost binary or skeleton chunk / disconnect) is dropped + `onError`. `0` disables. |
-| `onError`      | no-op    | `(err) => void` — decode, malformed-chunk or TTL errors.                |
+| `onError`      | no-op    | `(err) => void` — decode, malformed-chunk or TTL errors. Decode errors carry `err.code` (`IORPC_BIN_DECODE` — bad skeleton JSON, `IORPC_BIN_UNKNOWN_TYPE` — message type from a newer/incompatible peer, `IORPC_BIN_MALFORMED` — truncated message), plus `err.msgId` / `err.type` when known. |
 
 ## Reliability notes
 

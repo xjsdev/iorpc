@@ -51,12 +51,14 @@ function bigObject(size) {
 function strictPair({ max = 262144, chOpts = {}, localB = {}, optionsA = {}, optionsB = {} } = {}) {
   const link = createBinLink({ maxMessageSize: max });
   const strict = t => ({ ...t, sendBin(u8) { if (u8.byteLength > max) throw new Error('Message size exceeds limit'); t.sendBin(u8); } });
-  const cA = binChannel(strict(link.tA), chOpts), cB = binChannel(strict(link.tB), chOpts);
+  const o = { chunkSkeleton: true, ...chOpts };
+  const cA = binChannel(strict(link.tA), o), cB = binChannel(strict(link.tB), o);
   const a = pair({ send: cA.send, on: cA.on, options: optionsA });
   const b = pair({ send: cB.send, on: cB.on, local: localB, options: optionsB });
   return { a, b, cA, cB, link, max };
 }
 
+// Тести формату type 2 явно вмикають chunkSkeleton: true (з 9.3.1 за замовчуванням вимкнено).
 test('bigskel: скелет, що вміщується, іде type 0 побайтово як старий формат', () => {
   const { out, t } = recorder(262144);
   const ch = binChannel(t);
@@ -76,7 +78,7 @@ test('bigskel: межа chunk+HEAD — рівно вміщується → type 
   const fit = chunkSize + HEAD - 7 - 8;
   for (const [n, type] of [[fit, 0], [fit + 1, 2]]) {
     const { out, t } = recorder();
-    binChannel(t, { chunkSize }).send(mk(n));
+    binChannel(t, { chunkSize, chunkSkeleton: true }).send(mk(n));
     assert.equal(out[0][0], type, 'n=' + n);
     for (const m of out) assert.ok(m.byteLength <= chunkSize + HEAD);
     if (type === 0) assert.deepEqual(out[0], oldType0(1, 0, mk(n)));
@@ -87,7 +89,7 @@ test('bigskel: межа chunk+HEAD — рівно вміщується → type 
 test('bigskel: формат type 2 — заголовок [2][msgId][binsCount][seq][total]', () => {
   const { out, t } = recorder();
   const obj = { s: 'y'.repeat(250), b: Buffer.from([9]) };
-  binChannel(t, { chunkSize: 100 }).send(obj);
+  binChannel(t, { chunkSize: 100, chunkSkeleton: true }).send(obj);
   const json = enc.encode(JSON.stringify({ s: 'y'.repeat(250), b: { __bin: 0 } }));
   const total = Math.ceil(json.length / 100);
   assert.equal(out.length, total + 1);
@@ -159,7 +161,7 @@ test('bigskel: реентрантний send із sendBin не вклинюєт�
       if (!fired) { fired = true; ch.send({ small: 1 }); }
     },
     onBin() {}
-  }, { chunkSize: 50 });
+  }, { chunkSize: 50, chunkSkeleton: true });
   ch.send({ s: 'z'.repeat(500), b: Buffer.alloc(120, 7) });
   const ids = out.map(m => new DataView(m.buffer).getUint32(1));
   const firstOf2 = ids.indexOf(2);
@@ -178,7 +180,7 @@ test('bigskel: реентрантний send із sendBin не вклинюєт�
 
 test('bigskel: втрачений шматок скелета → pendingTTL → onError, канал живий далі', async () => {
   const { out, t } = recorder();
-  const tx = binChannel(t, { chunkSize: 100 });
+  const tx = binChannel(t, { chunkSize: 100, chunkSkeleton: true });
   tx.send({ s: 'q'.repeat(1000) });
   tx.send({ s: 'ok'.repeat(300) });
   const r = receiver({ chunkSize: 100, pendingTTL: 30 });
@@ -193,7 +195,7 @@ test('bigskel: втрачений шматок скелета → pendingTTL →
 
 test('bigskel: reset() посеред збирання скелета чистить стан', () => {
   const { out, t } = recorder();
-  binChannel(t, { chunkSize: 100 }).send({ s: 'w'.repeat(1000), b: Buffer.from([1]) });
+  binChannel(t, { chunkSize: 100, chunkSkeleton: true }).send({ s: 'w'.repeat(1000), b: Buffer.from([1]) });
   const r = receiver({ chunkSize: 100, pendingTTL: 0 });
   const half = Math.floor(out.length / 2);
   out.slice(0, half).forEach(r.feed);
@@ -209,7 +211,7 @@ test('bigskel: reset() посеред збирання скелета чисти
 
 test('bigskel: reset() на відправнику чистить недовідправлені шматки скелета', () => {
   let n = 0, ch;
-  ch = binChannel({ sendBin() { if (++n === 3) throw new Error('closed'); }, onBin() {} }, { chunkSize: 100 });
+  ch = binChannel({ sendBin() { if (++n === 3) throw new Error('closed'); }, onBin() {} }, { chunkSize: 100, chunkSkeleton: true });
   assert.throws(() => ch.send({ s: 'e'.repeat(1000) }), /closed/);
   ch.reset();
   const { out, t } = recorder();
@@ -221,7 +223,7 @@ test('bigskel: reset() на відправнику чистить недовід
 test('bigskel: мок-транспорт, що кидає на oversize, — жодне повідомлення не перевищує ліміт', () => {
   for (const max of [64, 1000, 262144]) {
     const { out, t } = recorder(max);
-    const ch = binChannel(t, { chunkSize: 200000 });
+    const ch = binChannel(t, { chunkSize: 200000, chunkSkeleton: true });
     ch.send({ big: bigObject(max * 5), bin: crypto.randomBytes(max * 3) });
     for (const m of out) assert.ok(m.byteLength <= max);
     const r = receiver({ pendingTTL: 0 });
@@ -233,7 +235,7 @@ test('bigskel: мок-транспорт, що кидає на oversize, — ж�
 
 test('bigskel: ліміти u16 — зрозуміла помилка і нічого не відправлено', () => {
   const cases = [
-    [{ chunkSize: 1 }, { s: 'x'.repeat(70000) }, /skeleton too large/],
+    [{ chunkSize: 1, chunkSkeleton: true }, { s: 'x'.repeat(70000) }, /skeleton too large/],
     [{ chunkSize: 1 }, { b: new Uint8Array(70000) }, /binary #0 too large/],
     [{}, { list: Array.from({ length: 65536 }, () => new Uint8Array(1)) }, /too many binary values/]
   ];
@@ -269,7 +271,11 @@ test('bigskel: биті шматки скелета → onError, без підв
   assert.match(r.errors[0].message, /bad skeleton chunk/);
   assert.match(r.errors[1].message, /header mismatch/);
   assert.ok(r.errors[2] instanceof SyntaxError);
-  assert.match(r.errors[3].message, /unknown message type 9/);
+  assert.equal(r.errors[2].code, 'IORPC_BIN_DECODE');
+  assert.equal(r.errors[2].msgId, 7);
+  assert.ok(r.errors[2].cause instanceof SyntaxError);
+  assert.match(r.errors[3].message, /unknown message type 9 msgId=1/);
+  assert.equal(r.errors[3].code, 'IORPC_BIN_UNKNOWN_TYPE');
   r.feed(mk(0, 2, 0, '{"a"')); r.feed(mk(1, 2, 0, ':1}')); // після помилок той самий msgId збирається
   assert.deepEqual(r.got, [{ a: 1 }]);
 });

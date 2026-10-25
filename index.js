@@ -529,6 +529,12 @@
    * @param {boolean} [opts.assembleBins=false] - false: zero-copy view / { __binChunks } array;
    *                                              true: merge into one contiguous buffer (copy).
    * @param {number}  [opts.pendingTTL=30000] - ms to drop an unfinished packet (disconnect / lost chunk). 0 disables.
+   * @param {boolean|'auto'} [opts.chunkSkeleton=false] - chunking of large JSON skeletons (type 2 messages):
+   *   false  — never: a skeleton is always one type 0 message (wire-identical to 9.2.x, any peer understands it);
+   *   'auto' — announce support (type 3 hello before the first packet) and chunk only after
+   *            the peer's hello arrived (the peer must use 'auto' as well);
+   *   true   — always chunk, no hello (wire-identical to 9.3.0; the peer must be >= 9.3.0).
+   *   Receiving type 2 is always supported regardless of this option.
    * @param {function}[opts.onError] - (err) => void: decode / TTL errors.
    * @returns {{ send: function, on: function, reset: function }}
    */
@@ -536,20 +542,49 @@
     chunkSize = 200000,
     assembleBins = false,
     pendingTTL = 30000,
+    chunkSkeleton = false,
     onError = () => {}
   } = {}) => {
-    // Wire-формат (кожне повідомлення ≤ chunk + HEAD байт):
+    // Wire-формат:
     //   type 0 — скелет цілком:   [0][msgId:u32][binsCount:u16] + JSON
     //   type 1 — шматок бінара:   [1][msgId:u32][binIdx:u16][seq:u16][total:u16] + байти
     //   type 2 — шматок скелета:  [2][msgId:u32][binsCount:u16][seq:u16][total:u16] + частина JSON
-    // type 2 вживається лише коли type 0 не вміщується у chunk + HEAD.
+    //   type 3 — hello/можливості: [3][0:u32][caps:u16][0:u16][0:u16]  (рівно HEAD байт)
+    // type 2 вживається лише коли type 0 не вміщується у chunk + HEAD І дозволено chunkSkeleton
+    // (true, або 'auto' після hello від peer з CAP_SKEL_CHUNKS). За замовчуванням (false) великий
+    // скелет іде одним type 0, як у 9.2.x — приймач 9.2.x не знає type 2 і мовчки його губить.
+    // type 3 має довжину HEAD і msgId=0: приймач 9.2.x читає його як bin-шматок неіснуючого
+    // packet і ігнорує (без RangeError); 9.3.0 віддає в onError "unknown message type 3".
     const HEAD = 11,
       SKEL_HEAD = 7,
       U16 = 0xffff;
+    const CAP_SKEL_CHUNKS = 1;
+    if (chunkSkeleton !== false && chunkSkeleton !== true && chunkSkeleton !== 'auto') {
+      throw new TypeError("binChannel: chunkSkeleton must be false, true or 'auto'");
+    }
     const max = transport.maxMessageSize;
     const chunk = Math.max(1, Math.floor(Math.min(chunkSize, (max || Infinity) - HEAD)));
     let msgId = 0;
     const pending = new Map();
+    let peerCaps = 0; // можливості peer з його type 3
+    let announced = false; // чи відправлено наш type 3 (скидається в reset)
+    const canChunkSkel = () => chunkSkeleton === true || chunkSkeleton === 'auto' && (peerCaps & CAP_SKEL_CHUNKS) !== 0;
+    const nextId = () => {
+      msgId = msgId + 1 >>> 0;
+      if (msgId === 0) msgId = 1; // 0 зарезервовано під службові повідомлення (type 3)
+      return msgId;
+    };
+    const helloMsg = () => {
+      const m = new Uint8Array(HEAD),
+        dv = new DataView(m.buffer);
+      dv.setUint8(0, 3);
+      dv.setUint32(1, 0);
+      dv.setUint16(5, CAP_SKEL_CHUNKS);
+      return _wrap(m);
+    };
+    const decodeErr = (Cls, code, msg, extra) => Object.assign(new Cls('binChannel: ' + msg), {
+      code
+    }, extra);
 
     // Вихідна черга: гарантує, що повідомлення кожного packet виходять у transport.sendBin
     // суцільним блоком і у порядку постановки — навіть якщо sendBin реентрантно
@@ -575,16 +610,20 @@
       const skel = _enc.encode(JSON.stringify(_extract(packet, bins)));
       // Ліміти u16 перевіряємо ДО постановки в outQ — щоб не лишити в черзі пів-packet.
       if (bins.length > U16) throw new RangeError('binChannel: too many binary values in packet: ' + bins.length + ' > ' + U16);
-      const skelTotal = SKEL_HEAD + skel.length > chunk + HEAD ? Math.ceil(skel.length / chunk) : 0;
+      const skelTotal = canChunkSkel() && SKEL_HEAD + skel.length > chunk + HEAD ? Math.ceil(skel.length / chunk) : 0;
       if (skelTotal > U16) throw new RangeError('binChannel: skeleton too large: ' + skel.length + ' bytes needs ' + skelTotal + ' chunks > ' + U16);
       const binTotals = bins.map((b, bi) => {
         const t = Math.max(1, Math.ceil(b.length / chunk));
         if (t > U16) throw new RangeError('binChannel: binary #' + bi + ' too large: ' + b.length + ' bytes needs ' + t + ' chunks > ' + U16);
         return t;
       });
-      const id = msgId = msgId + 1 >>> 0;
+      if (chunkSkeleton === 'auto' && !announced) {
+        announced = true;
+        outQ.push(helloMsg());
+      }
+      const id = nextId();
       if (!skelTotal) {
-        // скелет вміщується: формат type 0, побайтово як у попередніх версіях
+        // скелет вміщується (або чанкування скелета не дозволене): type 0, побайтово як у 9.2.x
         const h = new Uint8Array(SKEL_HEAD + skel.length),
           dv = new DataView(h.buffer);
         dv.setUint8(0, 0);
@@ -648,11 +687,31 @@
         try {
           const u8 = _toU8(raw);
           const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+          if (u8.byteLength < 1) throw decodeErr(Error, 'IORPC_BIN_MALFORMED', 'empty message');
           const type = dv.getUint8(0);
+          const minLen = type === 0 ? SKEL_HEAD : HEAD;
+          if (type <= 3 && u8.byteLength < minLen) {
+            const id = u8.byteLength >= 5 ? dv.getUint32(1) : undefined;
+            throw decodeErr(Error, 'IORPC_BIN_MALFORMED', 'truncated message type ' + type + ': ' + u8.byteLength + ' < ' + minLen + ' bytes' + (id !== undefined ? ' msgId=' + id : ''), {
+              msgId: id,
+              type
+            });
+          }
+          const parseSkel = (bytes, id) => {
+            try {
+              return JSON.parse(_dec.decode(bytes));
+            } catch (e) {
+              throw decodeErr(SyntaxError, 'IORPC_BIN_DECODE', 'bad skeleton JSON msgId=' + id + ': ' + e.message, {
+                msgId: id,
+                type,
+                cause: e
+              });
+            }
+          };
           if (type === 0) {
             const id = dv.getUint32(1),
               count = dv.getUint16(5);
-            const skeleton = JSON.parse(_dec.decode(u8.subarray(SKEL_HEAD)));
+            const skeleton = parseSkel(u8.subarray(SKEL_HEAD), id);
             if (!count) return handler(_inject(skeleton, []));
             if (pending.has(id)) drop(id);
             pending.set(id, {
@@ -711,7 +770,7 @@
               }
               p.skel = null;
               try {
-                p.skeleton = JSON.parse(_dec.decode(all));
+                p.skeleton = parseSkel(all, id);
               } catch (e) {
                 drop(id);
                 throw e;
@@ -748,8 +807,15 @@
               }
             }
             if (p.needed === 0 && p.skeleton !== undefined) flush(id);
+          } else if (type === 3) {
+            // hello від peer: його можливості. Розуміємо завжди, незалежно від chunkSkeleton.
+            peerCaps = dv.getUint16(5);
           } else {
-            throw new Error('binChannel: unknown message type ' + type);
+            const id = u8.byteLength >= 5 ? dv.getUint32(1) : undefined;
+            throw decodeErr(Error, 'IORPC_BIN_UNKNOWN_TYPE', 'unknown message type ' + type + (id !== undefined ? ' msgId=' + id : '') + ' (peer uses a newer/incompatible binChannel wire format?)', {
+              msgId: id,
+              type
+            });
           }
         } catch (e) {
           onError(e);
@@ -761,6 +827,8 @@
     const reset = () => {
       for (const id of [...pending.keys()]) drop(id);
       outQ.length = 0;
+      peerCaps = 0; // новий peer після перепідключення може бути іншої версії
+      announced = false; // повторимо hello перед наступним packet
     };
     return {
       send,
